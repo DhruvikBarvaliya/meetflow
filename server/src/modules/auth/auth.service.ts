@@ -25,9 +25,65 @@ import { REFRESH_TOKEN_TTL_SECONDS, signAccessToken, type SignedAccessToken } fr
 
 const log = createLogger('auth');
 
-/** Progressive lockout: slows credential stuffing without locking a real user out for long. */
-const MAX_FAILED_LOGINS = 8;
-const LOCKOUT_MINUTES = 15;
+/**
+ * Progressive lockout.
+ *
+ * `failedLoginCount` is a running total that survives a lockout. Only a
+ * successful sign-in — or a completed password reset, which proves control of
+ * the mailbox — clears it. Every `FAILURES_PER_LOCKOUT` further failures
+ * therefore lands on the next rung of the ladder below, so an attacker who
+ * politely waits out a lock finds the following one longer rather than
+ * identical.
+ *
+ * This is the part that used to be missing. Zeroing the counter at lockout time
+ * (which is what the code did while this comment already said "progressive")
+ * made the ladder a permanently flat eight guesses per fifteen minutes — around
+ * 768 guesses per account per day, sustainable indefinitely, which is well
+ * inside the range where a weak password falls.
+ *
+ * The trade-off runs the other way too, and the schedule is chosen for it. A
+ * legitimate user who has genuinely forgotten their password can climb these
+ * rungs, so the ladder starts at fifteen minutes — short enough to simply wait
+ * out — and is capped at twelve hours rather than growing without bound, so a
+ * forgetful user is never locked out for longer than roughly a sleep. Past the
+ * cap the ladder repeats. Self-service recovery is always available regardless
+ * of position on the ladder: `resetPassword` clears the counter and the lock
+ * together, and that flow is the intended escape hatch rather than a support
+ * ticket.
+ */
+const FAILURES_PER_LOCKOUT = 8;
+const LOCKOUT_LADDER_MINUTES = [15, 60, 360, 720] as const;
+
+/**
+ * The lock this failure has just earned, or null if it earns none.
+ *
+ * `failures` is the running total *including* the failure being recorded, so a
+ * lock fires on each exact multiple of `FAILURES_PER_LOCKOUT` and the rung is
+ * chosen by how many locks have already been served.
+ */
+function lockoutUntil(failures: number): Date | null {
+  if (failures < FAILURES_PER_LOCKOUT || failures % FAILURES_PER_LOCKOUT !== 0) return null;
+  const rung = Math.min(failures / FAILURES_PER_LOCKOUT - 1, LOCKOUT_LADDER_MINUTES.length - 1);
+  return new Date(Date.now() + LOCKOUT_LADDER_MINUTES[rung]! * 60_000);
+}
+
+/**
+ * A genuine bcrypt digest of a value nobody holds, compared against on a
+ * sign-in for an address that has no account.
+ *
+ * It has to be a *parseable* digest. The literal that used to sit inline at the
+ * call site ('$2a$12$invalid…') is 63 characters, and bcryptjs rejects anything
+ * that is not exactly 60 outright — so the comparison returned false in well
+ * under a millisecond while a real account cost ~300ms of key stretching. The
+ * comment claiming constant time was, in practice, describing a clean
+ * account-enumeration oracle readable off a stopwatch, and enumerating live
+ * addresses is the first half of a password-spraying run.
+ *
+ * Started at import and awaited per call: computing it eagerly costs one hash
+ * per process rather than one per unknown-address sign-in, and the promise has
+ * always resolved long before the first request lands.
+ */
+const DUMMY_PASSWORD_HASH: Promise<string> = hashPassword(newRefreshToken());
 
 export interface RequestMetadata {
   ipAddress?: string | null;
@@ -205,11 +261,9 @@ export async function login(
     new UnauthenticatedError('Incorrect email address or password.', ErrorCode.INVALID_CREDENTIALS);
 
   if (!user) {
-    // Still hash a dummy value so a missing account is not detectably faster.
-    await verifyPassword(
-      password,
-      '$2a$12$invalidinvalidinvalidinvalidinvalidinvalidinvalidinvalid',
-    );
+    // Burn the same bcrypt work a real account would have cost, so a missing
+    // account is not detectably faster. See DUMMY_PASSWORD_HASH.
+    await verifyPassword(password, await DUMMY_PASSWORD_HASH);
     await recordAudit({
       actorType: 'PUBLIC',
       actorLabel: normalised,
@@ -249,10 +303,14 @@ export async function login(
   const passwordMatches = await verifyPassword(password, user.passwordHash);
   if (!passwordMatches) {
     const failures = user.failedLoginCount + 1;
-    const shouldLock = failures >= MAX_FAILED_LOGINS;
+    const lockedUntil = lockoutUntil(failures);
     await user.update({
-      failedLoginCount: shouldLock ? 0 : failures,
-      lockedUntil: shouldLock ? new Date(Date.now() + LOCKOUT_MINUTES * 60_000) : null,
+      // The count is never reset here — that is what makes the ladder escalate.
+      failedLoginCount: failures,
+      // Safe to clear on a non-locking failure: an *unexpired* lock never
+      // reaches this line, because `user.isLocked` above returns first. The
+      // only lock that can be standing here is one that has already run out.
+      lockedUntil,
     });
     await recordAudit({
       actorType: 'USER',
@@ -264,12 +322,15 @@ export async function login(
       requestId: metadata.requestId,
       ipAddress: metadata.ipAddress,
       userAgent: metadata.userAgent,
-      metadata: { failedAttempts: failures, locked: shouldLock },
+      metadata: { failedAttempts: failures, locked: lockedUntil !== null, lockedUntil },
     });
     throw invalid();
   }
 
   return sequelize.transaction(async (transaction) => {
+    // The only place the lockout ladder is reset. Proving knowledge of the
+    // password is the single event that says the preceding failures were a
+    // human misremembering rather than someone guessing.
     await user.update(
       { failedLoginCount: 0, lockedUntil: null, lastLoginAt: new Date() },
       { transaction },

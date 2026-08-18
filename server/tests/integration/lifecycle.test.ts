@@ -11,12 +11,20 @@ import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   Appointment,
   AppointmentParticipant,
+  AppointmentResource,
   AppointmentStaff,
   AppointmentStatusHistory,
   BusinessSettings,
   Customer,
+  Membership,
   Notification,
   RescheduleHistory,
+  Resource,
+  Role,
+  ServiceResourceRequirement,
+  ServiceStaff,
+  StaffAvailabilityRule,
+  StaffProfile,
 } from '../../src/database/models';
 import { createBooking } from '../../src/modules/appointments/booking.service';
 import {
@@ -24,11 +32,14 @@ import {
   checkInAppointment,
   completeAppointment,
   markNoShow,
+  rejectAppointment,
   rescheduleAppointment,
 } from '../../src/modules/appointments/lifecycle.service';
 import { ErrorCode } from '../../src/utils/errors';
+import { formatForHumans } from '../../src/utils/time';
 import {
   closeDatabaseConnection,
+  createUser,
   createWorkspace,
   nextWeekdayAt,
   resetDatabase,
@@ -47,11 +58,15 @@ afterAll(async () => {
   await closeDatabaseConnection();
 });
 
-async function book(startsAt: Date, email = 'lifecycle@meetflow.test') {
+async function book(
+  startsAt: Date,
+  email = 'lifecycle@meetflow.test',
+  staffProfileId = fixture.staffProfile.id,
+) {
   return createBooking({
     businessId: fixture.business.id,
     serviceId: fixture.service.id,
-    staffProfileId: fixture.staffProfile.id,
+    staffProfileId,
     locationId: null,
     startsAt,
     timezone: 'UTC',
@@ -59,6 +74,101 @@ async function book(startsAt: Date, email = 'lifecycle@meetflow.test') {
     source: 'PUBLIC',
     actor: { type: 'CUSTOMER', label: email },
   });
+}
+
+/**
+ * A second bookable provider in the same workspace.
+ *
+ * Needed because resource contention requires appointments that overlap in
+ * time, and `appointment_staff_no_overlap` forbids that for a single provider —
+ * so a shared room can only be filled up by several people using it at once.
+ */
+async function addProvider(displayName: string): Promise<StaffProfile> {
+  const user = await createUser();
+  const role = await Role.findOne({ where: { businessId: fixture.business.id } });
+  if (!role) throw new Error('fixture expected the workspace to have system roles');
+
+  const membership = await Membership.create({
+    userId: user.id,
+    businessId: fixture.business.id,
+    roleId: role.id,
+    status: 'ACTIVE',
+    invitedByUserId: null,
+    invitedAt: null,
+    joinedAt: new Date(),
+  });
+
+  const profile = await StaffProfile.create({
+    businessId: fixture.business.id,
+    userId: user.id,
+    membershipId: membership.id,
+    displayName,
+    title: null,
+    bio: null,
+    avatarUrl: null,
+    timezone: 'UTC',
+    defaultLocationId: null,
+    preBufferMinutes: null,
+    postBufferMinutes: null,
+    minNoticeMinutes: null,
+    maxDailyAppointments: null,
+    maxWeeklyAppointments: null,
+    lastAssignedAt: null,
+  });
+
+  await ServiceStaff.create({
+    serviceId: fixture.service.id,
+    staffProfileId: profile.id,
+    durationMinutesOverride: null,
+    priceAmountOverride: null,
+  });
+
+  // Same Mon–Fri 09:00–17:00 the fixture gives the owner, so the slot engine
+  // offers this provider the same hours.
+  await StaffAvailabilityRule.bulkCreate(
+    [1, 2, 3, 4, 5].map((dayOfWeek) => ({
+      businessId: fixture.business.id,
+      staffProfileId: profile.id,
+      locationId: null,
+      dayOfWeek,
+      startMinute: 9 * 60,
+      endMinute: 17 * 60,
+      effectiveFrom: null,
+      effectiveTo: null,
+    })),
+  );
+
+  return profile;
+}
+
+/**
+ * Makes the fixture service depend on one room of the given capacity.
+ *
+ * `capacity` is the whole point of these tests: at 1 the database's exclusion
+ * constraint refuses a second holder on its own, and above 1 it cannot — the
+ * constraint has no way to say "at most N" — so everything above 1 rests on the
+ * application counting under a row lock.
+ */
+async function requireRoom(capacity: number): Promise<Resource> {
+  const resource = await Resource.create({
+    businessId: fixture.business.id,
+    locationId: null,
+    name: 'Treatment room',
+    slug: `treatment-room-${process.pid}-${Date.now()}`,
+    description: null,
+    capacity,
+    color: null,
+  });
+
+  await ServiceResourceRequirement.create({
+    serviceId: fixture.service.id,
+    resourceId: resource.id,
+    resourceType: null,
+    quantity: 1,
+    isRequired: true,
+  });
+
+  return resource;
 }
 
 describe('reschedule', () => {
@@ -113,6 +223,48 @@ describe('reschedule', () => {
     // One row for the booking, one for the move.
     expect(statusHistory.length).toBeGreaterThanOrEqual(2);
     expect(statusHistory.at(-1)!.toStatus).toBe('RESCHEDULED');
+  });
+
+  it('withdraws the reminders queued for the old time and queues new ones', async () => {
+    const original = nextWeekdayAt(10);
+    const moved = nextWeekdayAt(14);
+    const { appointment } = await book(original);
+
+    const queuedAtBooking = await Notification.findAll({
+      where: { appointmentId: appointment.id, type: 'APPOINTMENT_REMINDER' },
+    });
+    expect(queuedAtBooking.length).toBeGreaterThan(0);
+    expect(queuedAtBooking.every((row) => row.status === 'PENDING')).toBe(true);
+
+    await rescheduleAppointment({
+      businessId: fixture.business.id,
+      appointmentId: appointment.id,
+      newStartsAt: moved,
+      actor,
+    });
+
+    // Every reminder written at booking time counts down to an hour the
+    // appointment has left, so none of them may still be waiting to fire.
+    const afterMove = await Notification.findAll({
+      where: { id: { [Op.in]: queuedAtBooking.map((row) => row.id) } },
+    });
+    expect(afterMove.every((row) => row.status === 'CANCELLED')).toBe(true);
+
+    // Replacements exist, at the workspace's own offsets from the new start.
+    const pending = await Notification.findAll({
+      where: { appointmentId: appointment.id, type: 'APPOINTMENT_REMINDER', status: 'PENDING' },
+    });
+    const settings = await BusinessSettings.findByPk(fixture.business.id);
+    const expected = settings!.reminderOffsetsMinutes.map((offset) =>
+      new Date(moved.getTime() - offset * 60_000).toISOString(),
+    );
+    expect(pending.map((row) => row.scheduledFor.toISOString()).sort()).toEqual(expected.sort());
+
+    // The payload has to be rebuilt too: the one frozen at booking still spells
+    // out the old hour, so a correctly-timed reminder could still name 10:00.
+    for (const row of pending) {
+      expect(row.payload.startsAtLocal).toBe(formatForHumans(moved, 'UTC'));
+    }
   });
 
   it('refuses a move onto a time that is already taken', async () => {
@@ -294,6 +446,113 @@ describe('cancel', () => {
       where: { appointmentId: first.appointment.id, status: { [Op.ne]: 'CANCELLED' } },
     });
     expect(participants).toHaveLength(1);
+  });
+});
+
+describe('reject', () => {
+  it('withdraws the reminders queued for a booking it refuses', async () => {
+    // Approval turns the booking into a PENDING request, which is the only
+    // status a rejection can act on.
+    await BusinessSettings.update(
+      { requireApproval: true },
+      { where: { businessId: fixture.business.id } },
+    );
+
+    const { appointment } = await book(nextWeekdayAt(10));
+    expect(appointment.status).toBe('PENDING');
+
+    const queued = await Notification.findAll({
+      where: { appointmentId: appointment.id, type: 'APPOINTMENT_REMINDER', status: 'PENDING' },
+    });
+    expect(queued.length).toBeGreaterThan(0);
+
+    const rejected = await rejectAppointment({
+      businessId: fixture.business.id,
+      appointmentId: appointment.id,
+      reason: 'Fully booked that morning',
+      actor,
+    });
+    expect(rejected.status).toBe('REJECTED');
+
+    // Nobody may be reminded to turn up for an appointment that was refused.
+    const stillPending = await Notification.count({
+      where: { appointmentId: appointment.id, type: 'APPOINTMENT_REMINDER', status: 'PENDING' },
+    });
+    expect(stillPending).toBe(0);
+
+    const withdrawn = await Notification.findAll({
+      where: { id: { [Op.in]: queued.map((row) => row.id) } },
+    });
+    expect(withdrawn.every((row) => row.status === 'CANCELLED')).toBe(true);
+  });
+});
+
+describe('resource holds across a reschedule', () => {
+  it('refuses a move into a shared resource that is already at capacity', async () => {
+    const room = await requireRoom(2);
+    const original = nextWeekdayAt(10);
+    const target = nextWeekdayAt(11);
+
+    const { appointment } = await book(original);
+
+    // Both of the room's two places are taken at the target hour. It takes two
+    // other providers to arrange that: one provider cannot hold two overlapping
+    // appointments.
+    const second = await addProvider('Second provider');
+    const third = await addProvider('Third provider');
+    await book(target, 'second@meetflow.test', second.id);
+    await book(target, 'third@meetflow.test', third.id);
+
+    // capacity > 1 has no exclusion constraint behind it, so this is refused by
+    // the capacity count or by nothing at all.
+    await expect(
+      rescheduleAppointment({
+        businessId: fixture.business.id,
+        appointmentId: appointment.id,
+        newStartsAt: target,
+        actor,
+      }),
+    ).rejects.toMatchObject({ code: ErrorCode.RESOURCE_UNAVAILABLE });
+
+    // A refused move leaves the original booking exactly as it was — same time,
+    // same hold — rather than half-applied.
+    const unchanged = await Appointment.findByPk(appointment.id);
+    expect(unchanged!.startsAt.toISOString()).toBe(original.toISOString());
+    expect(unchanged!.status).toBe('CONFIRMED');
+    expect(unchanged!.rescheduleCount).toBe(0);
+
+    const holds = await AppointmentResource.findAll({ where: { appointmentId: appointment.id } });
+    expect(holds).toHaveLength(1);
+    expect(holds[0]!.resourceId).toBe(room.id);
+    expect(holds[0]!.startsAt.toISOString()).toBe(original.toISOString());
+  });
+
+  it('frees the resource at the original time when the move succeeds', async () => {
+    await requireRoom(1);
+    const original = nextWeekdayAt(10);
+    const moved = nextWeekdayAt(11);
+
+    const { appointment } = await book(original);
+    const other = await addProvider('Other provider');
+
+    // While the room is held, nobody else can be booked into that hour.
+    await expect(book(original, 'other@meetflow.test', other.id)).rejects.toMatchObject({
+      code: ErrorCode.RESOURCE_UNAVAILABLE,
+    });
+
+    await rescheduleAppointment({
+      businessId: fixture.business.id,
+      appointmentId: appointment.id,
+      newStartsAt: moved,
+      actor,
+    });
+
+    const holds = await AppointmentResource.findAll({ where: { appointmentId: appointment.id } });
+    expect(holds).toHaveLength(1);
+    expect(holds[0]!.startsAt.toISOString()).toBe(moved.toISOString());
+
+    // And the vacated hour is claimable again.
+    await expect(book(original, 'other@meetflow.test', other.id)).resolves.toBeTruthy();
   });
 });
 

@@ -78,16 +78,36 @@ Exactly one worker wins; the rest find zero rows updated and exit. Then:
 - **failure, budget spent** → `FAILED`, `failed_at`, last error kept
 
 Returning to `PENDING` rather than staying `PROCESSING` is deliberate: both the
-BullMQ retry and the sweep can then pick it up, so a worker that dies mid-job
-does not strand the message.
+BullMQ retry and the sweep can then pick it up.
+
+That covers a worker which _handles_ its failure. A worker killed outright —
+SIGKILL, OOM, a pod evicted mid-delivery — never writes that transition at all,
+and the row stays `PROCESSING` with nothing looking for it. Worse, BullMQ's own
+stalled-job retry fires ~30s later, finds nothing left to claim, and completes
+_successfully_, so the failure leaves no trace anywhere.
+
+The sweep closes this. Any claim untouched for ten minutes is treated as dead
+and returned to `PENDING` with its attempt count preserved, so the existing
+retry budget still bounds it. Ten minutes is an order of magnitude above the
+longest a live claim can take: every exit from `PROCESSING` is a single write at
+the end of one attempt, and the SMTP transport gives up well inside a minute
+even when every timeout fires in sequence.
+
+Reclaiming the row is necessary but not sufficient. Delivery jobs are keyed
+`notification:<id>`, and BullMQ treats `add` for an existing id as a no-op —
+including an id sitting in the completed set _because_ the stalled retry ran and
+returned successfully. The sweep therefore drops that job key before requeueing,
+or the message would strand a second time in a different status.
 
 ## States
 
 ```
 PENDING ──claim──► PROCESSING ──ok──► SENT
    ▲                    │
-   └────retry left──────┤
-                        └──budget spent──► FAILED
+   ├────retry left──────┤
+   │                    └──budget spent──► FAILED
+   │                    │
+   └──claim went stale──┘
 
 PENDING ──appointment cancelled / no provider──► CANCELLED
 ```
@@ -101,8 +121,19 @@ built-in default.
 
 Rendering is deliberately **not** a general template engine. Bodies are partly
 author-controlled, and a real engine would turn "edit your confirmation email"
-into arbitrary code execution. It is a `{{path}}` substitution with HTML
-escaping on the HTML branch, and nothing else.
+into arbitrary code execution. It is a `{{path}}` substitution and nothing else.
+
+Escaping happens at one point, and the order matters. A notification's body is
+substituted **raw** when the row is enqueued — that string is the plain-text
+part of the message, and escaping there would show a customer "Ben &amp; Jerry".
+The HTML part is built at delivery, from that already-substituted text, so
+escaping only the placeholders would escape nothing: there are none left. The
+whole body is therefore escaped _before_ any remaining substitution runs, which
+is safe because `{{ path }}` contains no escapable character and survives the
+pass intact.
+
+Getting this backwards is not a cosmetic bug. A customer's own name, typed into
+a public booking form, would reach the recipient's inbox as live markup.
 
 ## Providers
 

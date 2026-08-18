@@ -48,6 +48,7 @@ import {
   isSlotBookable,
   type BusyInterval,
   type CandidateSlot,
+  type RejectionReason,
   type WorkingWindow,
 } from './slotEngine';
 import { rankCandidates, type StaffCandidate } from './smartMatch';
@@ -125,6 +126,19 @@ export function resolvePolicy(
     priceAmount: serviceStaff?.priceAmountOverride ?? service.priceAmount,
     currency: service.currency,
   };
+}
+
+/**
+ * The last calendar date the booking horizon reaches, seen from `zone`.
+ *
+ * The search clamp and the confirmation check both come through here instead of
+ * each doing the arithmetic themselves. The horizon is a whole-day rule, so two
+ * independent implementations could disagree about which day an instant belongs
+ * to — and the moment they disagree the search offers a slot that confirmation
+ * refuses, which is exactly the failure this helper exists to prevent.
+ */
+function horizonDateInZone(now: Date, maxHorizonDays: number, zone: string): IsoDate {
+  return toIsoDateInZone(addMinutes(now, maxHorizonDays * 24 * 60), zone);
 }
 
 // ---------------------------------------------------------------------------
@@ -429,10 +443,7 @@ export async function searchAvailability(
 
   // Clamp the requested range to the booking horizon and the notice period.
   const basePolicy = resolvePolicy(service, settings);
-  const horizonEnd = toIsoDateInZone(
-    addMinutes(now, basePolicy.maxHorizonDays * 24 * 60),
-    input.timezone,
-  );
+  const horizonEnd = horizonDateInZone(now, basePolicy.maxHorizonDays, input.timezone);
   const effectiveFrom =
     input.fromDate < toIsoDateInZone(now, input.timezone)
       ? toIsoDateInZone(now, input.timezone)
@@ -748,11 +759,30 @@ export async function getPolicyFor(input: {
 }
 
 /**
+ * Customer-facing wording for every way a requested time can be refused.
+ *
+ * Keyed on the engine's rejection reasons so a new reason cannot be introduced
+ * without wording to go with it.
+ */
+const REFUSAL_MESSAGES: Record<RejectionReason, string> = {
+  TOO_SOON: 'That time is inside the minimum booking notice for this service.',
+  OUTSIDE_WORKING_HOURS: 'That time is outside the available hours for this service.',
+  CONFLICT: 'That time is no longer available.',
+  OUTSIDE_RANGE: 'That time is further ahead than this service can be booked.',
+  LIMIT_REACHED: 'A booking limit has been reached for that time.',
+};
+
+/**
  * Re-validates one exact requested time.
  *
  * Called at booking confirmation, on the freshest possible data. This is the
  * "recompute eligibility" step of the booking transaction — the offered slot
  * may be seconds old, and the world may have moved.
+ *
+ * Both edges of the bookable window are enforced here: the minimum notice
+ * (inside `isSlotBookable`) and the booking horizon. Neither can be left to the
+ * search, because a caller who names a provider and posts a start time never
+ * runs a search at all.
  */
 export async function verifySlot(input: {
   businessId: string;
@@ -761,6 +791,14 @@ export async function verifySlot(input: {
   staffProfileId: string;
   locationId: string | null;
   startsAt: Date;
+  /**
+   * The zone the availability search ran in — the customer's own, on a booking
+   * path. The horizon is a calendar-day rule and which day an instant falls on
+   * depends on who is asking, so confirmation must read the date in the same
+   * zone the search read it in. Defaults to the business zone for callers that
+   * never ran a search.
+   */
+  timezone?: string | null;
   now?: Date;
 }): Promise<{ ok: boolean; reason?: string; policy: EffectivePolicy }> {
   const now = input.now ?? new Date();
@@ -871,6 +909,23 @@ export async function verifySlot(input: {
       })),
   ];
 
+  // The booking horizon is the far edge of the window whose near edge the
+  // minimum notice guards below, so the two checks sit together. The search
+  // clamps its range to the horizon, but that clamp protects only callers who
+  // went through the search: naming a provider and posting a start time reaches
+  // confirmation directly, and without this could book years past the horizon
+  // the workspace publishes on its own booking page.
+  //
+  // Boundary: the search offers the *whole* of the horizon date — it clamps
+  // `effectiveTo` to that date inclusive and runs the range to its final minute
+  // — so a start on that date is accepted here and only later dates refused.
+  // Both sides derive the date from `horizonDateInZone` in the same zone, which
+  // is what guarantees a slot the search offered is never refused at commit.
+  const zone = input.timezone ?? input.businessTimezone;
+  if (toIsoDateInZone(input.startsAt, zone) > horizonDateInZone(now, policy.maxHorizonDays, zone)) {
+    return { ok: false, reason: REFUSAL_MESSAGES.OUTSIDE_RANGE, policy };
+  }
+
   const verdict = isSlotBookable({
     startsAt: input.startsAt,
     durationMinutes: policy.durationMinutes,
@@ -884,12 +939,5 @@ export async function verifySlot(input: {
 
   if (verdict.bookable) return { ok: true, policy };
 
-  const reasons: Record<string, string> = {
-    TOO_SOON: 'That time is inside the minimum booking notice for this service.',
-    OUTSIDE_WORKING_HOURS: 'That time is outside the available hours for this service.',
-    CONFLICT: 'That time is no longer available.',
-    OUTSIDE_RANGE: 'That time is outside the bookable window.',
-    LIMIT_REACHED: 'A booking limit has been reached for that time.',
-  };
-  return { ok: false, reason: reasons[verdict.reason ?? 'CONFLICT'], policy };
+  return { ok: false, reason: REFUSAL_MESSAGES[verdict.reason ?? 'CONFLICT'], policy };
 }

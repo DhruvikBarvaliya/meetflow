@@ -2,18 +2,30 @@
  * Appointment lifecycle: reschedule, cancel, approve, reject, check-in,
  * complete and no-show.
  *
- * Two principles run through all of it:
+ * Three principles run through all of it:
  *
  *  1. **History is never overwritten.** A reschedule keeps the appointment's
  *     identity (so the customer's management link never breaks) and records the
  *     move in `reschedule_history`; every status change appends to
  *     `appointment_status_history`. Nothing is silently mutated away.
  *
- *  2. **Reservations follow the appointment.** Moving an appointment moves its
- *     staff and resource reservations, so the database exclusion constraints
- *     keep guarding the new time. Cancelling releases them by clearing the
+ *  2. **Reservations are re-claimed, never slid.** Moving an appointment
+ *     re-runs the reservation it made at booking time against the new window:
+ *     the staff row is deleted and re-inserted so the exclusion constraint has
+ *     to re-check it, and resources go back through the same capacity-counting
+ *     path a first booking uses. Sliding the rows with a bare UPDATE would look
+ *     equivalent and is not — a shared resource (capacity > 1) has no exclusion
+ *     constraint behind it, so an UPDATE that skips the count is guarded by
+ *     nothing. Cancelling, by contrast, releases reservations by clearing the
  *     blocking flag rather than deleting the row, which frees the calendar
  *     while keeping the assignment auditable.
+ *
+ *  3. **Nothing outlives the appointment it describes.** A queued reminder is a
+ *     promise about one specific hour, carrying a payload frozen when it was
+ *     written. The moment that hour stops being true — the appointment moves,
+ *     or reaches a terminal state — the promise is withdrawn in the same
+ *     transaction as the change that broke it, and a reschedule queues fresh
+ *     reminders for the new time.
  */
 import type { Transaction } from 'sequelize';
 import { Op } from 'sequelize';
@@ -32,7 +44,9 @@ import {
   Location,
   Notification,
   RescheduleHistory,
+  Resource,
   Service,
+  ServiceResourceRequirement,
   StaffProfile,
 } from '../../database/models';
 import {
@@ -46,6 +60,7 @@ import {
   InvalidStateTransitionError,
   NotFoundError,
   PolicyViolationError,
+  ResourceUnavailableError,
   SlotUnavailableError,
 } from '../../utils/errors';
 import { addMinutes, differenceInMinutes, formatForHumans } from '../../utils/time';
@@ -193,6 +208,175 @@ async function buildPayload(
 }
 
 // ---------------------------------------------------------------------------
+// Queued messages that a change makes untrue
+// ---------------------------------------------------------------------------
+
+/**
+ * Which undelivered messages a move into `status` invalidates.
+ *
+ * A reminder only means anything before the appointment starts, so every
+ * terminal state withdraws it — including COMPLETED, where an un-sent reminder
+ * whose `scheduled_for` has quietly gone past would still be picked up by the
+ * delivery sweep and remind someone about a visit they have already had.
+ *
+ * A follow-up is the mirror image: it is *meant* to arrive afterwards, so it
+ * survives COMPLETED and is withdrawn only when the appointment never happened.
+ */
+function staleMessageTypes(status: AppointmentStatus): string[] {
+  return status === 'COMPLETED'
+    ? ['APPOINTMENT_REMINDER']
+    : ['APPOINTMENT_REMINDER', 'APPOINTMENT_FOLLOW_UP'];
+}
+
+/**
+ * Withdraws the outbox rows that are no longer true.
+ *
+ * CANCELLED rather than deleted: the outbox is the delivery record, and "we
+ * promised this and then withdrew it" is a different fact from "we never
+ * promised it". Only PENDING rows are touched — anything already PROCESSING or
+ * SENT has left, and rewriting its status would falsify the record.
+ *
+ * Always called inside the caller's transaction, so a rolled-back change cannot
+ * silence a reminder that is still due.
+ */
+async function withdrawStaleMessages(
+  appointmentId: string,
+  status: AppointmentStatus,
+  transaction: Transaction,
+): Promise<void> {
+  await Notification.update(
+    { status: 'CANCELLED' },
+    {
+      where: {
+        appointmentId,
+        status: 'PENDING',
+        type: { [Op.in]: staleMessageTypes(status) },
+      },
+      transaction,
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Resource reservation
+// ---------------------------------------------------------------------------
+
+/**
+ * Claims every resource a service requires for one window.
+ *
+ * Deliberately the same algorithm as `reserveResources` in booking.service.ts —
+ * row lock on the candidates, count of live overlaps against capacity, a
+ * SAVEPOINT per attempt — because a reschedule has to be exactly as hard to
+ * oversubscribe as a first booking. Single-capacity resources end up protected
+ * by the `appointment_resources_no_overlap` exclusion constraint whatever the
+ * application does; shared ones (capacity > 1) have no such constraint, because
+ * "at most N overlapping" is not expressible as an exclusion, so for those the
+ * count taken under the row lock is the only thing between two transactions and
+ * a double claim. The two copies must change together; the only reason this is
+ * not one function is that booking.service.ts keeps its copy private.
+ */
+async function reserveResources(
+  input: {
+    businessId: string;
+    serviceId: string;
+    locationId: string | null;
+    appointmentId: string;
+    bufferStartAt: Date;
+    bufferEndAt: Date;
+  },
+  transaction: Transaction,
+): Promise<void> {
+  const requirements = await ServiceResourceRequirement.findAll({
+    where: { serviceId: input.serviceId },
+    transaction,
+  });
+  if (requirements.length === 0) return;
+
+  for (const requirement of requirements) {
+    const candidates = await Resource.findAll({
+      where: {
+        businessId: input.businessId,
+        isActive: true,
+        ...(requirement.resourceId ? { id: requirement.resourceId } : {}),
+        ...(requirement.resourceType ? { type: requirement.resourceType } : {}),
+        // A resource pinned to a location can only serve that location.
+        ...(input.locationId
+          ? { [Op.or]: [{ locationId: input.locationId }, { locationId: { [Op.is]: null } }] }
+          : {}),
+      },
+      order: [['name', 'ASC']],
+      transaction,
+      // Serialises selection of the same shared resource across transactions.
+      lock: transaction.LOCK.UPDATE,
+    });
+
+    let remaining = requirement.quantity;
+
+    for (const resource of candidates) {
+      if (remaining === 0) break;
+
+      const overlapping = await AppointmentResource.count({
+        where: {
+          resourceId: resource.id,
+          isActive: true,
+          startsAt: { [Op.lt]: input.bufferEndAt },
+          endsAt: { [Op.gt]: input.bufferStartAt },
+        },
+        transaction,
+      });
+      if (overlapping >= resource.capacity) continue;
+
+      try {
+        // SAVEPOINT, not a bare INSERT: losing the race for one resource must
+        // leave the surrounding transaction usable so the next candidate can be
+        // tried. Without it, PostgreSQL aborts the whole transaction on the
+        // first constraint violation.
+        await sequelize.transaction({ transaction }, async (savepoint) =>
+          AppointmentResource.create(
+            {
+              appointmentId: input.appointmentId,
+              resourceId: resource.id,
+              quantity: 1,
+              startsAt: input.bufferStartAt,
+              endsAt: input.bufferEndAt,
+              isExclusive: resource.capacity === 1,
+              isActive: true,
+            },
+            { transaction: savepoint },
+          ),
+        );
+        remaining -= 1;
+      } catch (error) {
+        // Lost the race for this specific resource; try the next candidate
+        // rather than failing the whole move.
+        if (
+          error instanceof Error &&
+          (error.name === 'SequelizeExclusionConstraintError' ||
+            error.name === 'SequelizeUniqueConstraintError')
+        ) {
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    if (remaining > 0) {
+      if (requirement.isRequired) {
+        throw new ResourceUnavailableError(
+          'A room or piece of equipment this service needs is not available at that time.',
+          { requirement: requirement.resourceType ?? requirement.resourceId, shortfall: remaining },
+        );
+      }
+      // Optional requirement: proceed without it rather than block the move.
+      log.debug(
+        { serviceId: input.serviceId, requirementId: requirement.id, shortfall: remaining },
+        'optional resource requirement not fully satisfied',
+      );
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Reschedule
 // ---------------------------------------------------------------------------
 
@@ -325,10 +509,30 @@ export async function rescheduleAppointment(input: RescheduleInput): Promise<App
       { transaction },
     );
 
-    // Resource holds move with the appointment.
-    await AppointmentResource.update(
-      { startsAt: bufferStartAt, endsAt: bufferEndAt },
-      { where: { appointmentId: appointment.id, isActive: true }, transaction },
+    // Resource holds are released and re-claimed, not slid across. Sliding them
+    // with an UPDATE never re-runs the capacity count, and a shared resource has
+    // no exclusion constraint to catch what the count would have — so the new
+    // window could be oversubscribed with nothing complaining. Deleting first is
+    // what makes the swap atomic: within this transaction the old window is
+    // already free, so an overlapping move does not conflict with itself and
+    // `appointment_resources_unique (appointment_id, resource_id)` does not
+    // reject re-claiming the very same room. If the new window cannot be
+    // satisfied, `reserveResources` throws, the transaction rolls back, and the
+    // appointment keeps both its original time and its original holds.
+    await AppointmentResource.destroy({
+      where: { appointmentId: appointment.id },
+      transaction,
+    });
+    await reserveResources(
+      {
+        businessId: appointment.businessId,
+        serviceId: appointment.serviceId,
+        locationId: appointment.locationId,
+        appointmentId: appointment.id,
+        bufferStartAt,
+        bufferEndAt,
+      },
+      transaction,
     );
 
     await RescheduleHistory.create(
@@ -379,6 +583,13 @@ export async function rescheduleAppointment(input: RescheduleInput): Promise<App
       { transaction },
     );
 
+    // Every reminder queued for the old time is now a lie twice over: its
+    // `scheduled_for` counts down to an hour the appointment has left, and its
+    // payload still spells out the old `startsAtLocal`. Withdraw them here and
+    // queue replacements below — both inside this transaction, so a move that
+    // rolls back cannot leave the customer with no reminder at all.
+    await withdrawStaleMessages(appointment.id, 'RESCHEDULED', transaction);
+
     const { payload, customer } = await buildPayload(appointment, transaction);
     if (customer) {
       await enqueueNotification(
@@ -398,6 +609,38 @@ export async function rescheduleAppointment(input: RescheduleInput): Promise<App
         },
         { transaction },
       );
+
+      // Fresh reminders for the new time, from the workspace's own offsets —
+      // the same source booking reads, so a business that configured "three days
+      // before" keeps getting three days before after a move. `payload` was
+      // rebuilt from the already-updated appointment, so `startsAtLocal` reads
+      // the new hour. Offsets that have already gone past are skipped rather
+      // than fired immediately.
+      for (const offsetMinutes of settings.reminderOffsetsMinutes) {
+        const scheduledFor = addMinutes(input.newStartsAt, -offsetMinutes);
+        if (scheduledFor.getTime() <= Date.now()) continue;
+
+        await enqueueNotification(
+          {
+            businessId: appointment.businessId,
+            type: 'APPOINTMENT_REMINDER',
+            recipientType: 'CUSTOMER',
+            recipientCustomerId: customer.id,
+            recipientAddress: customer.email,
+            appointmentId: appointment.id,
+            payload,
+            scheduledFor,
+            // The booking-time key is `remind:<appointment>:<customer>:<offset>`
+            // and it now belongs to the row we just cancelled. Reusing it would
+            // hit the unique index on `dedupe_key`, which `enqueueNotification`
+            // reads as "already queued" — leaving the customer with no reminder
+            // whatsoever. The reschedule counter distinguishes every move, and
+            // its extra segment can never collide with the booking-time form.
+            dedupeKey: `remind:${appointment.id}:${customer.id}:r${appointment.rescheduleCount}:${offsetMinutes}`,
+          },
+          { transaction },
+        );
+      }
     }
 
     return appointment;
@@ -546,17 +789,7 @@ export async function cancelAppointment(input: CancelInput): Promise<Appointment
     );
 
     // Pending reminders for a cancelled appointment must not go out.
-    await Notification.update(
-      { status: 'CANCELLED' },
-      {
-        where: {
-          appointmentId: appointment.id,
-          status: 'PENDING',
-          type: { [Op.in]: ['APPOINTMENT_REMINDER', 'APPOINTMENT_FOLLOW_UP'] },
-        },
-        transaction,
-      },
-    );
+    await withdrawStaleMessages(appointment.id, 'CANCELLED', transaction);
 
     if (appointment.customerId) {
       const customer = await Customer.findByPk(appointment.customerId, { transaction });
@@ -696,7 +929,10 @@ async function transition(
 
     await appointment.update({ status: to, ...apply(appointment) }, { transaction });
 
-    // Terminal states release the calendar.
+    // Terminal states release the calendar and withdraw what was still queued.
+    // Rejection is the case that matters most here: a customer whose booking
+    // was refused was, until this ran, still going to be reminded to turn up
+    // for it.
     if (TERMINAL_APPOINTMENT_STATUSES.includes(to)) {
       await AppointmentStaff.update(
         { isBlocking: false },
@@ -706,6 +942,7 @@ async function transition(
         { isActive: false },
         { where: { appointmentId: appointment.id }, transaction },
       );
+      await withdrawStaleMessages(appointment.id, to, transaction);
     }
 
     await appendHistory(appointment, from, to, input.actor, input.reason ?? null, {}, transaction);

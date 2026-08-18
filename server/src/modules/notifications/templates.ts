@@ -350,6 +350,11 @@ function lookup(payload: Record<string, unknown>, path: string): string {
  * Deliberately not a general template engine: notification bodies are partly
  * author-controlled, and a real engine would turn "edit your confirmation
  * email" into arbitrary code execution.
+ *
+ * `html: true` escapes the *substituted values only* — never the template text
+ * around them, which is why it is no defence on a string whose placeholders
+ * were already filled. Callers building HTML must escape the text first; see
+ * `textToHtml`.
  */
 export function renderTemplate(
   template: string,
@@ -362,11 +367,34 @@ export function renderTemplate(
   });
 }
 
-/** Minimal, readable HTML wrapper around a rendered plain-text body. */
+/**
+ * Minimal, readable HTML wrapper around a message body.
+ *
+ * The escape runs on `text` *before* substitution, and the order is the whole
+ * point. By the time delivery gets here the body has normally already had its
+ * placeholders filled at enqueue time, so a render pass over it finds no
+ * `{{ }}` left, escapes nothing, and every payload value — a customer's own
+ * first name among them — reaches the inbox as live markup. Escaping the
+ * string first covers exactly those values.
+ *
+ * Escaping first cannot break the other caller shape either: a `{{ path }}`
+ * placeholder contains no character `escapeHtml` touches, so a still-unrendered
+ * template survives intact and its values are escaped as they are substituted.
+ * Nothing is double-escaped, because the second pass only ever rewrites the
+ * values it substitutes, never the surrounding text it has already escaped.
+ *
+ * Escaping the whole string is correct rather than lossy because a notification
+ * body is plain text by contract (see the `body` column on the Notification
+ * model); there is no author-supplied markup in it to preserve.
+ *
+ * Known and accepted: a payload value that itself looks like `{{other}}` is
+ * resolved by the substitution pass. That leaks nothing, since `lookup` only
+ * ever reads the same payload this message was rendered from.
+ */
 export function textToHtml(text: string, payload: Record<string, unknown>): string {
-  const escaped = renderTemplate(text, payload, { html: true })
+  const rendered = renderTemplate(escapeHtml(text), payload, { html: true })
     .split('\n')
     .map((line) => (line.trim() === '' ? '<br/>' : `<p style="margin:0 0 8px">${line}</p>`))
     .join('');
-  return `<div style="font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;font-size:15px;line-height:1.55;color:#111827;max-width:560px">${escaped}</div>`;
+  return `<div style="font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;font-size:15px;line-height:1.55;color:#111827;max-width:560px">${rendered}</div>`;
 }

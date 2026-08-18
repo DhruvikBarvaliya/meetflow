@@ -98,6 +98,12 @@ export async function enqueueNotification(
   let subject = input.subject;
   let body = input.body;
 
+  // Rendered without the HTML escape on purpose: what is stored is the
+  // plain-text message, exactly as the text part of the email will read, and
+  // escaping here would show a customer called "Ben & Jerry" their own name as
+  // "Ben &amp; Jerry". The HTML alternative is a delivery-time projection of
+  // this string — `buildHtmlBody` escapes it there, where it is about to become
+  // markup and escaping is meaningful.
   if (!subject || !body) {
     if (input.type === 'EMAIL_VERIFICATION' || input.type === 'PASSWORD_RESET') {
       const system = SYSTEM_TEMPLATES[input.type];
@@ -219,7 +225,14 @@ export async function enqueuePasswordReset(input: {
   });
 }
 
-/** Renders the HTML body at delivery time, from the stored plain-text body. */
+/**
+ * Renders the HTML body at delivery time, from the stored plain-text body.
+ *
+ * This is the only place a notification becomes markup, so it is the only place
+ * that has to escape. `textToHtml` escapes the stored body before it substitutes
+ * anything — the stored body already contains the payload values verbatim, so
+ * escaping after substitution would come one pass too late to matter.
+ */
 export function buildHtmlBody(body: string, payload: Record<string, unknown>): string {
   return textToHtml(body, payload);
 }

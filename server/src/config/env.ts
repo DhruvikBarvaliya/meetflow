@@ -193,6 +193,24 @@ const schema = z
           message: 'LOG_PRETTY must be false in production so logs stay machine-parseable',
         });
       }
+      // The console provider is the default, which makes this the one production
+      // misconfiguration nobody has to make on purpose. It is also worse than
+      // having no transport at all: a transport that throws puts the
+      // notification row back to PENDING for the retry budget and the sweep to
+      // pick up, whereas the console provider *reports success*. Every
+      // confirmation and every reminder is then marked SENT while nothing
+      // leaves the building, and the first person to notice is a customer who
+      // never got their booking confirmation. Refuse to start instead.
+      if (value.EMAIL_PROVIDER === 'console') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['EMAIL_PROVIDER'],
+          message:
+            'EMAIL_PROVIDER must be smtp in production — the console provider writes mail to ' +
+            'the log and reports it as sent, so notifications are marked SENT and never ' +
+            'delivered. Set EMAIL_PROVIDER=smtp and supply SMTP_HOST.',
+        });
+      }
       for (const [key, secret] of [
         ['JWT_ACCESS_SECRET', value.JWT_ACCESS_SECRET],
         ['JWT_REFRESH_SECRET', value.JWT_REFRESH_SECRET],

@@ -553,7 +553,10 @@ export async function createBooking(input: CreateBookingInput): Promise<BookingR
     // A group session that already exists and still has room is joined, not
     // rebooked. Slot verification is skipped for that path on purpose: the
     // session holds its own staff reservation, so re-verifying would find that
-    // reservation and refuse to let anyone join the class.
+    // reservation and refuse to let anyone join the class. The notice and
+    // horizon checks go with it — the session cleared both when it was created,
+    // and turning a later policy change into "you may not join a class that is
+    // already in the diary" would punish the wrong person.
     const joinable = service.capacity > 1 ? await findJoinableAppointment(input) : null;
 
     let policy: EffectivePolicy;
@@ -571,6 +574,11 @@ export async function createBooking(input: CreateBookingInput): Promise<BookingR
         staffProfileId: input.staffProfileId,
         locationId: input.locationId ?? null,
         startsAt: input.startsAt,
+        // The caller's own zone, which is also the zone their availability
+        // search ran in. The booking horizon is counted in calendar days, so
+        // confirmation has to read the date exactly as the search did or the
+        // furthest slot on offer could be refused the moment it is booked.
+        timezone: input.timezone,
       });
       if (!verdict.ok) {
         throw new SlotUnavailableError(verdict.reason ?? 'That time is no longer available.');
