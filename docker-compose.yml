@@ -1,0 +1,162 @@
+# =============================================================================
+# MeetFlow — development stack
+# =============================================================================
+#   npm run infra:up      -> Postgres + Redis only (recommended for local dev,
+#                            run API/worker/client on the host with hot reload)
+#   docker compose up -d  -> full stack in containers
+#
+# Production deployment uses docker/docker-compose.prod.yml.
+# =============================================================================
+
+name: meetflow
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: meetflow-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: meetflow
+      POSTGRES_PASSWORD: meetflow
+      POSTGRES_DB: meetflow_dev
+      # Deterministic collation keeps ORDER BY stable across machines.
+      POSTGRES_INITDB_ARGS: '--encoding=UTF8 --locale=C'
+    ports:
+      # Host port is configurable so the stack still comes up on machines that
+      # already run PostgreSQL locally. Set POSTGRES_HOST_PORT in .env.
+      - '${POSTGRES_HOST_PORT:-5432}:5432'
+    volumes:
+      - meetflow_pgdata:/var/lib/postgresql/data
+      # Creates the additional test database used by the integration suite.
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U meetflow -d meetflow_dev']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: meetflow-redis
+    restart: unless-stopped
+    # appendonly keeps queued jobs across restarts; Redis is still not the
+    # system of record — booking correctness lives in PostgreSQL.
+    command: ['redis-server', '--appendonly', 'yes', '--maxmemory-policy', 'noeviction']
+    ports:
+      # Configurable for the same reason as POSTGRES_HOST_PORT above.
+      - '${REDIS_HOST_PORT:-6379}:6379'
+    volumes:
+      - meetflow_redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+
+  server:
+    build:
+      context: .
+      dockerfile: docker/server.Dockerfile
+      target: development
+    container_name: meetflow-server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      APP_ENV: development
+      PORT: '4000'
+      HOST: 0.0.0.0
+      LOG_LEVEL: debug
+      LOG_PRETTY: 'true'
+      DATABASE_URL: postgres://meetflow:meetflow@postgres:5432/meetflow_dev
+      REDIS_URL: redis://redis:6379
+      REDIS_KEY_PREFIX: meetflow:dev
+      JWT_ACCESS_SECRET: dev_only_access_secret_change_me_0123456789abcdef
+      JWT_REFRESH_SECRET: dev_only_refresh_secret_change_me_0123456789abcdef
+      CORS_ORIGINS: http://localhost:5173
+      SOCKET_ORIGIN: http://localhost:5173
+      PUBLIC_APP_URL: http://localhost:5173
+      API_BASE_URL: http://localhost:4000
+      EMAIL_PROVIDER: console
+      # The dedicated worker service owns background processing.
+      RUN_WORKER_IN_API: 'false'
+      SEED_ENABLED: 'true'
+    ports:
+      - '4000:4000'
+    volumes:
+      - ./server:/app/server
+      - /app/server/node_modules
+      - /app/node_modules
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "require('http').get('http://127.0.0.1:4000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/server.Dockerfile
+      target: development
+    container_name: meetflow-worker
+    restart: unless-stopped
+    command: ['npm', '--workspace', 'server', 'run', 'dev:worker']
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      APP_ENV: development
+      LOG_LEVEL: debug
+      LOG_PRETTY: 'true'
+      DATABASE_URL: postgres://meetflow:meetflow@postgres:5432/meetflow_dev
+      REDIS_URL: redis://redis:6379
+      REDIS_KEY_PREFIX: meetflow:dev
+      JWT_ACCESS_SECRET: dev_only_access_secret_change_me_0123456789abcdef
+      JWT_REFRESH_SECRET: dev_only_refresh_secret_change_me_0123456789abcdef
+      PUBLIC_APP_URL: http://localhost:5173
+      API_BASE_URL: http://localhost:4000
+      EMAIL_PROVIDER: console
+      WORKER_CONCURRENCY: '5'
+    volumes:
+      - ./server:/app/server
+      - /app/server/node_modules
+      - /app/node_modules
+
+  client:
+    build:
+      context: .
+      dockerfile: docker/client.Dockerfile
+      target: development
+    container_name: meetflow-client
+    restart: unless-stopped
+    depends_on:
+      - server
+    environment:
+      VITE_API_BASE_URL: http://localhost:4000
+      VITE_SOCKET_URL: http://localhost:4000
+    ports:
+      - '5173:5173'
+    volumes:
+      - ./client:/app/client
+      - /app/client/node_modules
+      - /app/node_modules
+
+volumes:
+  meetflow_pgdata:
+  meetflow_redisdata:

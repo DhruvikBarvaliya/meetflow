@@ -1,0 +1,22 @@
+{
+  "name": "@meetflow/e2e",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "MeetFlow end-to-end business flow tests (Playwright)",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:ui": "playwright test --ui",
+    "report": "playwright show-report",
+    "install:browsers": "playwright install --with-deps chromium",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.1",
+    "@types/node": "^22.10.7",
+    "luxon": "^3.5.0",
+    "@types/luxon": "^3.4.2",
+    "typescript": "^5.7.3"
+  }
+}

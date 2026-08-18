@@ -1,0 +1,307 @@
+# =============================================================================
+# MeetFlow — production stack
+# =============================================================================
+#   docker compose -f docker/docker-compose.prod.yml up -d --build
+#
+# Differences from the root docker-compose.yml, all deliberate:
+#   * no bind mounts — the images are the deliverable, so what runs in staging
+#     is byte-identical to what runs in production;
+#   * PostgreSQL and Redis are on an `internal` network with no published
+#     ports, so the datastores are unreachable from the host and the internet;
+#   * every secret is interpolated from the environment. Nothing sensitive is
+#     written in this file, and nothing sensitive is baked into an image.
+#
+# MIGRATIONS run before the first `up` and before every deploy that adds one.
+# The API refuses to boot without them (src/config/database.ts checks for the
+# sequelize_meta table), and they are deliberately not a container start-up
+# hook: N replicas racing the same migration is how a schema gets corrupted.
+# The production image carries runtime dependencies only, so sequelize-cli runs
+# from the release checkout, not from a stack service:
+#
+#   # against a managed database (CI/CD, the usual case)
+#   DATABASE_URL=... npm --workspace server run db:migrate
+#
+#   # against this stack's PostgreSQL, which publishes no port — join a
+#   # throwaway container to the stack network instead of exposing 5432.
+#   # Use a clean checkout: `npm ci` here overwrites node_modules with a
+#   # linux-x64 tree.
+#   docker compose -f docker/docker-compose.prod.yml up -d postgres
+#   docker run --rm --network meetflow-prod_data -v "$PWD:/repo" -w /repo \
+#     -e DATABASE_URL="postgres://meetflow:$POSTGRES_PASSWORD@postgres:5432/meetflow" \
+#     node:20-alpine sh -c 'npm ci && npm --workspace server run db:migrate'
+#
+# Required in the environment (compose refuses to start without them):
+#   POSTGRES_PASSWORD  JWT_ACCESS_SECRET  JWT_REFRESH_SECRET
+#   PUBLIC_APP_URL     PUBLIC_API_BASE_URL
+# See ../.env.production.example for the full annotated list.
+# =============================================================================
+
+name: meetflow-prod
+
+# -----------------------------------------------------------------------------
+# Shared fragments
+# -----------------------------------------------------------------------------
+
+# Container logs are the only record of a production incident, and an unbounded
+# json-file driver has filled more than one disk. Rotate at a fixed budget.
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '5'
+
+# Applied to every service: stops a compromised process inside a container from
+# gaining privileges through a setuid binary.
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+
+# Configuration shared by the API and the worker. They are two commands over one
+# image, so they must agree on database, Redis, secrets and URLs exactly — a
+# divergence here means the worker signs tokens the API rejects.
+x-app-env: &app-env
+  NODE_ENV: production
+  APP_ENV: production
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  # Enforced by src/config/env.ts: production logs must stay machine-parseable.
+  LOG_PRETTY: 'false'
+
+  # Percent-encode any of : / ? # [ ] @ in the password, or the URL parser will
+  # split the connection string in the wrong place.
+  DATABASE_URL: postgres://${POSTGRES_USER:-meetflow}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:-meetflow}
+  # The in-stack PostgreSQL listens only on the internal network and serves no
+  # TLS certificate. Point DATABASE_URL at a managed instance and set this to
+  # true when the connection leaves the host.
+  DB_SSL: 'false'
+  DB_POOL_MIN: ${DB_POOL_MIN:-2}
+  DB_POOL_MAX: ${DB_POOL_MAX:-20}
+  DB_LOGGING: 'false'
+
+  REDIS_URL: redis://redis:6379
+  REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-meetflow:prod}
+
+  # No defaults on purpose. A guessable signing key is an authentication bypass,
+  # so the stack refuses to start rather than fall back to something weak.
+  # Generate with:
+  #   node -e "console.log(require('crypto').randomBytes(48).toString('base64url'))"
+  JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?JWT_ACCESS_SECRET is required — generate 48 random bytes}
+  JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?JWT_REFRESH_SECRET is required and must differ from JWT_ACCESS_SECRET}
+  JWT_ACCESS_EXPIRES_IN: ${JWT_ACCESS_EXPIRES_IN:-15m}
+  JWT_REFRESH_EXPIRES_IN: ${JWT_REFRESH_EXPIRES_IN:-30d}
+
+  # src/config/env.ts rejects http:// and * here when APP_ENV=production.
+  CORS_ORIGINS: ${PUBLIC_APP_URL:?PUBLIC_APP_URL is required — the https origin the browser app is served from}
+  SOCKET_ORIGIN: ${PUBLIC_APP_URL}
+  PUBLIC_APP_URL: ${PUBLIC_APP_URL}
+  API_BASE_URL: ${PUBLIC_API_BASE_URL:?PUBLIC_API_BASE_URL is required — the https origin the API is reached on}
+
+  # Passed through rather than defaulted: src/config/env.ts already refuses to
+  # boot with an incoherent mail configuration (for example EMAIL_PROVIDER=smtp
+  # with no SMTP_HOST) and reports exactly which value is wrong.
+  EMAIL_PROVIDER: ${EMAIL_PROVIDER:-smtp}
+  EMAIL_FROM: ${EMAIL_FROM:-MeetFlow <no-reply@meetflow.local>}
+  SMTP_HOST: ${SMTP_HOST:-}
+  SMTP_PORT: ${SMTP_PORT:-587}
+  SMTP_SECURE: ${SMTP_SECURE:-false}
+  SMTP_USER: ${SMTP_USER:-}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+
+  # Seeders are development fixtures; env.ts refuses to start production with
+  # them enabled, and rate limiting cannot be switched off in production.
+  SEED_ENABLED: 'false'
+  RATE_LIMIT_ENABLED: 'true'
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — system of record. Booking correctness depends on its
+  # constraints and transactions (docs/BookingConcurrency.md).
+  # ---------------------------------------------------------------------------
+  postgres:
+    <<: *hardening
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-meetflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-meetflow}
+      # Deterministic collation: ORDER BY must not depend on the host's locale,
+      # or paginated cursors drift between a replica and its primary.
+      POSTGRES_INITDB_ARGS: '--encoding=UTF8 --locale=C'
+    volumes:
+      - meetflow_pgdata:/var/lib/postgresql/data
+    networks:
+      - data
+    # No `ports`. The database is reachable only from the internal network;
+    # administrative access goes through `docker compose exec` or a bastion.
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -h 127.0.0.1']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    stop_grace_period: 30s
+    logging: *logging
+
+  # ---------------------------------------------------------------------------
+  # Redis — queues, cache, rate-limit counters, Socket.IO fan-out.
+  # ---------------------------------------------------------------------------
+  redis:
+    <<: *hardening
+    image: redis:7-alpine
+    restart: always
+    # appendonly survives a restart with queued jobs intact. noeviction is not
+    # optional: silently evicting a BullMQ key loses a reminder that a customer
+    # was promised, so Redis must refuse writes instead.
+    #
+    # No requirepass. The password would land in the container's argv, visible
+    # to anything that can read /proc; isolation on the internal network is the
+    # stronger control. Point REDIS_URL at a managed rediss:// endpoint with
+    # credentials when Redis has to leave the host.
+    command: ['redis-server', '--appendonly', 'yes', '--maxmemory-policy', 'noeviction']
+    volumes:
+      - meetflow_redisdata:/data
+    networks:
+      - data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 30s
+    logging: *logging
+
+  # ---------------------------------------------------------------------------
+  # API
+  # ---------------------------------------------------------------------------
+  server:
+    <<: *hardening
+    build:
+      context: ..
+      dockerfile: docker/server.Dockerfile
+      target: production
+    image: meetflow-server:${MEETFLOW_TAG:-latest}
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+      PORT: '4000'
+      HOST: 0.0.0.0
+      # Required behind a TLS terminator: without it every per-IP rate limit
+      # collapses onto the proxy's address and audit records log the proxy.
+      TRUST_PROXY: 'true'
+      # Job processing never shares a process with request handling in
+      # production — a burst of reminder emails must not add API latency.
+      RUN_WORKER_IN_API: 'false'
+    ports:
+      # Bound to loopback by default: TLS is terminated by a reverse proxy on
+      # the host. Set BIND_ADDRESS=0.0.0.0 only when an external load balancer
+      # provides that termination instead.
+      - '${BIND_ADDRESS:-127.0.0.1}:${SERVER_HOST_PORT:-4000}:4000'
+    networks:
+      - data
+      - edge
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "require('http').get('http://127.0.0.1:4000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+    # src/server.ts drains in-flight requests for up to 15s after SIGTERM; the
+    # grace period has to exceed that or Docker SIGKILLs mid-request.
+    stop_grace_period: 30s
+    logging: *logging
+
+  # ---------------------------------------------------------------------------
+  # Background worker — same image, different entry point, so an API and a
+  # worker can never be running code from different commits.
+  # ---------------------------------------------------------------------------
+  worker:
+    <<: *hardening
+    build:
+      context: ..
+      dockerfile: docker/server.Dockerfile
+      target: production
+    image: meetflow-server:${MEETFLOW_TAG:-latest}
+    restart: always
+    command: ['node', 'dist/worker.js']
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+      WORKER_CONCURRENCY: ${WORKER_CONCURRENCY:-10}
+      REMINDER_SWEEP_INTERVAL_SECONDS: ${REMINDER_SWEEP_INTERVAL_SECONDS:-60}
+    networks:
+      - data
+      - edge
+    healthcheck:
+      # The image's HEALTHCHECK probes /health over HTTP. The worker serves no
+      # HTTP, so inheriting it would mark a perfectly healthy container
+      # permanently unhealthy. Liveness here is process liveness: src/worker.ts
+      # exits non-zero on a fatal error and `restart: always` replaces it.
+      disable: true
+    # BullMQ's close() waits for in-flight jobs, so a deploy never kills a
+    # half-sent email or a webhook mid-delivery.
+    stop_grace_period: 60s
+    logging: *logging
+
+  # ---------------------------------------------------------------------------
+  # Web client — static bundle behind nginx.
+  # ---------------------------------------------------------------------------
+  client:
+    <<: *hardening
+    build:
+      context: ..
+      dockerfile: docker/client.Dockerfile
+      target: production
+      args:
+        # Vite inlines these into the bundle at build time, so the image is
+        # environment-specific. Only public endpoints appear here — a build arg
+        # is readable by every visitor who opens devtools.
+        VITE_API_BASE_URL: ${PUBLIC_API_BASE_URL:?PUBLIC_API_BASE_URL is required}
+        VITE_SOCKET_URL: ${PUBLIC_SOCKET_URL:-${PUBLIC_API_BASE_URL}}
+    image: meetflow-client:${MEETFLOW_TAG:-latest}
+    restart: always
+    depends_on:
+      # Not strictly required to serve static files, but it keeps a deploy from
+      # showing a working shell that cannot reach a broken API.
+      server:
+        condition: service_healthy
+    ports:
+      - '${BIND_ADDRESS:-127.0.0.1}:${CLIENT_HOST_PORT:-8080}:80'
+    networks:
+      - edge
+    healthcheck:
+      test: ['CMD', 'wget', '--quiet', '--spider', '--tries=1', 'http://127.0.0.1/healthz']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    stop_grace_period: 30s
+    logging: *logging
+
+networks:
+  # No route off the host. PostgreSQL and Redis hold every tenant's data and
+  # have no business initiating outbound connections.
+  data:
+    internal: true
+  # Carries published ports and the egress the API and worker need for SMTP and
+  # outbound webhook delivery.
+  edge:
+
+volumes:
+  meetflow_pgdata:
+  meetflow_redisdata:

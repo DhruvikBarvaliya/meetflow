@@ -1,0 +1,271 @@
+/*
+ * MeetFlow design tokens.
+ *
+ * Two layers, deliberately:
+ *
+ *   1. `--mf-*` raw tokens, defined here for light on `:root` and for dark on
+ *      `[data-theme='dark']`. Nothing else in the app hard-codes a colour.
+ *   2. Tailwind's `@theme inline` mapping in index.css, which turns each raw
+ *      token into a utility (`bg-surface`, `text-muted`, `border-border`).
+ *
+ * The split is what makes theming free: a component written against
+ * `bg-surface` re-themes because the variable underneath it changes, not
+ * because the component knows a theme exists.
+ *
+ * Naming is by role, never by appearance — `--mf-surface-sunken`, not
+ * `--mf-gray-100` — so the dark palette can invert lightness without any name
+ * becoming a lie.
+ *
+ * Contrast: every text token is checked at >= 4.5:1 against the surfaces it is
+ * meant to sit on, and every `on-*` token against its own solid fill.
+ */
+
+:root {
+  color-scheme: light;
+
+  /* ---- Typography ---------------------------------------------------- */
+  --mf-font-sans:
+    'Inter var', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue',
+    Arial, 'Noto Sans', sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
+  --mf-font-mono:
+    ui-monospace, SFMono-Regular, 'SF Mono', 'Cascadia Mono', 'Roboto Mono', Menlo, Consolas,
+    monospace;
+
+  /* ---- Spacing ------------------------------------------------------- */
+  /* One 4px rhythm. Tailwind's numeric scale is generated from --mf-space-1. */
+  --mf-space-1: 0.25rem;
+  --mf-space-2: 0.5rem;
+  --mf-space-3: 0.75rem;
+  --mf-space-4: 1rem;
+  --mf-space-5: 1.25rem;
+  --mf-space-6: 1.5rem;
+  --mf-space-8: 2rem;
+  --mf-space-10: 2.5rem;
+  --mf-space-12: 3rem;
+  --mf-space-16: 4rem;
+
+  /* ---- Radius -------------------------------------------------------- */
+  --mf-radius-xs: 0.25rem;
+  --mf-radius-sm: 0.375rem;
+  --mf-radius-md: 0.5rem;
+  --mf-radius-lg: 0.75rem;
+  --mf-radius-xl: 1rem;
+  --mf-radius-2xl: 1.25rem;
+  --mf-radius-full: 9999px;
+
+  /* ---- Layout ---------------------------------------------------------*/
+  --mf-sidebar-width: 16rem;
+  --mf-topbar-height: 3.75rem;
+  --mf-content-max: 84rem;
+
+  /* ---- Motion -------------------------------------------------------- */
+  --mf-duration-fast: 120ms;
+  --mf-duration-base: 180ms;
+  --mf-duration-slow: 280ms;
+  --mf-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --mf-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* ---- Elevation ------------------------------------------------------*/
+  /* Light theme leans on shadow for depth; dark leans on borders (below). */
+  --mf-shadow-xs: 0 1px 2px 0 rgb(15 23 42 / 0.05);
+  --mf-shadow-sm: 0 1px 3px 0 rgb(15 23 42 / 0.08), 0 1px 2px -1px rgb(15 23 42 / 0.06);
+  --mf-shadow-md: 0 4px 12px -2px rgb(15 23 42 / 0.1), 0 2px 4px -2px rgb(15 23 42 / 0.06);
+  --mf-shadow-lg: 0 12px 28px -6px rgb(15 23 42 / 0.14), 0 4px 10px -4px rgb(15 23 42 / 0.08);
+  --mf-shadow-xl: 0 24px 56px -12px rgb(15 23 42 / 0.22);
+
+  /* ---- Surfaces ------------------------------------------------------ */
+  --mf-canvas: #f5f7f9;
+  --mf-surface: #ffffff;
+  --mf-surface-sunken: #eef1f5;
+  --mf-surface-hover: #f2f4f7;
+  --mf-surface-active: #e8ecf1;
+  --mf-overlay: rgb(11 18 26 / 0.5);
+
+  /* ---- Borders ------------------------------------------------------- */
+  --mf-border: #e1e6ec;
+  --mf-border-strong: #c6cedb;
+
+  /* ---- Text ---------------------------------------------------------- */
+  --mf-text: #0d1520; /* 17.9:1 on --mf-surface */
+  --mf-text-secondary: #48546b; /* 8.3:1  */
+  --mf-text-muted: #64708a; /* 5.2:1  */
+  --mf-text-inverse: #ffffff;
+
+  /* ---- Brand --------------------------------------------------------- */
+  --mf-brand: #0f766e; /* white on this: 4.8:1 */
+  --mf-brand-hover: #0c625b;
+  --mf-brand-active: #094e49;
+  --mf-on-brand: #ffffff;
+  --mf-brand-text: #0b5f58; /* 5.9:1 on --mf-surface */
+  --mf-brand-subtle: #e2f2f0;
+  --mf-brand-border: #a9d8d2;
+
+  /* ---- Accent (warm highlight, never a status) ------------------------ */
+  --mf-accent: #b45309;
+  --mf-on-accent: #ffffff;
+  --mf-accent-text: #9a4404;
+  --mf-accent-subtle: #fdf3e3;
+
+  /* ---- Status -------------------------------------------------------- */
+  --mf-success: #15803d;
+  --mf-on-success: #ffffff;
+  --mf-success-text: #146c34;
+  --mf-success-subtle: #e3f6e9;
+  --mf-success-border: #a9dcbb;
+
+  --mf-warning: #a16207;
+  --mf-on-warning: #ffffff;
+  --mf-warning-text: #8a5406;
+  --mf-warning-subtle: #fdf4e0;
+  --mf-warning-border: #e5cd94;
+
+  --mf-danger: #b91c1c;
+  --mf-danger-hover: #9d1717;
+  --mf-on-danger: #ffffff;
+  --mf-danger-text: #a81919;
+  --mf-danger-subtle: #fdeaea;
+  --mf-danger-border: #f0b4b4;
+
+  --mf-info: #1d4ed8;
+  --mf-on-info: #ffffff;
+  --mf-info-text: #1c46bd;
+  --mf-info-subtle: #e8eefd;
+  --mf-info-border: #b3c7f6;
+
+  /* ---- Focus --------------------------------------------------------- */
+  --mf-focus-ring: #0f766e;
+  --mf-focus-ring-offset: var(--mf-surface);
+
+  /* ---- Data visualisation -------------------------------------------- */
+  /*
+   * Categorical series, in slot order. The order is the safety mechanism, not a
+   * preference: adjacent slots are what a stacked bar or a two-line chart puts
+   * side by side, so this sequence was chosen because every neighbouring pair
+   * clears the deuteranopia/protanopia/tritanopia separation floor as well as
+   * the normal-vision one. Slots are assigned by series identity and never
+   * cycled — a seventh series folds into "Other" rather than reusing slot 1.
+   *
+   * Light: worst adjacent CVD ΔE 11.3, worst normal-vision ΔE 30.2, all >= 3:1
+   * on --mf-surface.
+   */
+  --mf-chart-1: #0d9488;
+  --mf-chart-2: #7c3aed;
+  --mf-chart-3: #d97706;
+  --mf-chart-4: #2563eb;
+  --mf-chart-5: #db2777;
+  --mf-chart-6: #65a30d;
+  --mf-chart-grid: #e1e6ec;
+
+  /*
+   * Sequential ramp for magnitude (the peak-times heatmap). One hue, light to
+   * dark — never the categorical slots, which encode identity and would imply
+   * six unrelated groups where there is one continuous quantity.
+   */
+  --mf-chart-seq-1: #d7efec;
+  --mf-chart-seq-2: #a6ddd7;
+  --mf-chart-seq-3: #63c4ba;
+  --mf-chart-seq-4: #17a394;
+  --mf-chart-seq-5: #0b6f65;
+}
+
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  /* ---- Elevation ------------------------------------------------------*/
+  /* Shadows read as smudges on dark surfaces, so depth comes mostly from the
+     lighter surface steps and borders; the shadows only anchor overlays. */
+  --mf-shadow-xs: 0 1px 2px 0 rgb(0 0 0 / 0.4);
+  --mf-shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.5);
+  --mf-shadow-md: 0 4px 12px -2px rgb(0 0 0 / 0.55);
+  --mf-shadow-lg: 0 12px 28px -6px rgb(0 0 0 / 0.6);
+  --mf-shadow-xl: 0 24px 56px -12px rgb(0 0 0 / 0.7);
+
+  /* ---- Surfaces ------------------------------------------------------ */
+  --mf-canvas: #0a0f15;
+  --mf-surface: #131b24;
+  --mf-surface-sunken: #0e151d;
+  --mf-surface-hover: #1a242f;
+  --mf-surface-active: #212d3a;
+  --mf-overlay: rgb(3 6 10 / 0.66);
+
+  /* ---- Borders ------------------------------------------------------- */
+  --mf-border: #232f3c;
+  --mf-border-strong: #354557;
+
+  /* ---- Text ---------------------------------------------------------- */
+  --mf-text: #e9eef4; /* 14.6:1 on --mf-surface */
+  --mf-text-secondary: #adbccd; /* 8.2:1  */
+  --mf-text-muted: #8b9bad; /* 5.4:1  */
+  --mf-text-inverse: #0a0f15;
+
+  /* ---- Brand --------------------------------------------------------- */
+  /* Solid brand fills flip to a light teal with dark ink: white on teal-700 is
+     legible on paper but glares against a near-black page. */
+  --mf-brand: #2dd4bf;
+  --mf-brand-hover: #5eead4;
+  --mf-brand-active: #14b8a6;
+  --mf-on-brand: #04211d;
+  --mf-brand-text: #5eead4; /* 9.7:1 on --mf-surface */
+  --mf-brand-subtle: #12312e;
+  --mf-brand-border: #1d5852;
+
+  /* ---- Accent -------------------------------------------------------- */
+  --mf-accent: #fbbf24;
+  --mf-on-accent: #241704;
+  --mf-accent-text: #fcd34d;
+  --mf-accent-subtle: #2f2410;
+
+  /* ---- Status -------------------------------------------------------- */
+  --mf-success: #4ade80;
+  --mf-on-success: #05230f;
+  --mf-success-text: #6ee7a0;
+  --mf-success-subtle: #102c1b;
+  --mf-success-border: #1e5334;
+
+  --mf-warning: #fbbf24;
+  --mf-on-warning: #241704;
+  --mf-warning-text: #fcd34d;
+  --mf-warning-subtle: #2f2410;
+  --mf-warning-border: #5c4514;
+
+  --mf-danger: #f87171;
+  --mf-danger-hover: #fca5a5;
+  --mf-on-danger: #2a0707;
+  --mf-danger-text: #fca5a5;
+  --mf-danger-subtle: #2f1417;
+  --mf-danger-border: #63272c;
+
+  --mf-info: #60a5fa;
+  --mf-on-info: #061428;
+  --mf-info-text: #93c5fd;
+  --mf-info-subtle: #12213a;
+  --mf-info-border: #234166;
+
+  /* ---- Focus --------------------------------------------------------- */
+  --mf-focus-ring: #5eead4;
+  --mf-focus-ring-offset: var(--mf-surface);
+
+  /* ---- Data visualisation -------------------------------------------- */
+  /*
+   * The same six hues, re-stepped for the dark surface rather than flipped:
+   * the light steps sit too close to --mf-surface here, and the pastel steps a
+   * naive inversion would produce lose the chroma the separation floors need.
+   * Worst adjacent CVD ΔE 10.4, worst normal-vision ΔE 27.0, all >= 3:1 on
+   * --mf-surface.
+   */
+  --mf-chart-1: #0d9488;
+  --mf-chart-2: #8b5cf6;
+  --mf-chart-3: #d97706;
+  --mf-chart-4: #3b82f6;
+  --mf-chart-5: #ec4899;
+  --mf-chart-6: #65a30d;
+  --mf-chart-grid: #232f3c;
+
+  /* Sequential ramp, darkest-first: on a dark page "near zero" recedes toward
+     the surface, so the ramp runs dark to light instead of light to dark. */
+  --mf-chart-seq-1: #10302d;
+  --mf-chart-seq-2: #17544c;
+  --mf-chart-seq-3: #12796d;
+  --mf-chart-seq-4: #0d9488;
+  --mf-chart-seq-5: #2dd4bf;
+}

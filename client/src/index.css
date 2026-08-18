@@ -1,0 +1,293 @@
+@import 'tailwindcss';
+@import './styles/tokens.css';
+
+/*
+ * `@theme inline` publishes the raw `--mf-*` tokens as Tailwind utilities
+ * without copying their values: `bg-surface` compiles to
+ * `background-color: var(--mf-surface)`, so switching `data-theme` re-themes
+ * every utility at runtime with no rebuild and no duplicate dark: variants.
+ */
+@theme inline {
+  --font-sans: var(--mf-font-sans);
+  --font-mono: var(--mf-font-mono);
+
+  --spacing: var(--mf-space-1);
+
+  --radius-xs: var(--mf-radius-xs);
+  --radius-sm: var(--mf-radius-sm);
+  --radius-md: var(--mf-radius-md);
+  --radius-lg: var(--mf-radius-lg);
+  --radius-xl: var(--mf-radius-xl);
+  --radius-2xl: var(--mf-radius-2xl);
+
+  --shadow-xs: var(--mf-shadow-xs);
+  --shadow-sm: var(--mf-shadow-sm);
+  --shadow-md: var(--mf-shadow-md);
+  --shadow-lg: var(--mf-shadow-lg);
+  --shadow-xl: var(--mf-shadow-xl);
+
+  --color-canvas: var(--mf-canvas);
+  --color-surface: var(--mf-surface);
+  --color-surface-sunken: var(--mf-surface-sunken);
+  --color-surface-hover: var(--mf-surface-hover);
+  --color-surface-active: var(--mf-surface-active);
+  --color-overlay: var(--mf-overlay);
+
+  --color-border: var(--mf-border);
+  --color-border-strong: var(--mf-border-strong);
+
+  --color-fg: var(--mf-text);
+  --color-fg-secondary: var(--mf-text-secondary);
+  --color-fg-muted: var(--mf-text-muted);
+  --color-fg-inverse: var(--mf-text-inverse);
+
+  --color-brand: var(--mf-brand);
+  --color-brand-hover: var(--mf-brand-hover);
+  --color-brand-active: var(--mf-brand-active);
+  --color-on-brand: var(--mf-on-brand);
+  --color-brand-text: var(--mf-brand-text);
+  --color-brand-subtle: var(--mf-brand-subtle);
+  --color-brand-border: var(--mf-brand-border);
+
+  --color-accent: var(--mf-accent);
+  --color-on-accent: var(--mf-on-accent);
+  --color-accent-text: var(--mf-accent-text);
+  --color-accent-subtle: var(--mf-accent-subtle);
+
+  --color-success: var(--mf-success);
+  --color-on-success: var(--mf-on-success);
+  --color-success-text: var(--mf-success-text);
+  --color-success-subtle: var(--mf-success-subtle);
+  --color-success-border: var(--mf-success-border);
+
+  --color-warning: var(--mf-warning);
+  --color-on-warning: var(--mf-on-warning);
+  --color-warning-text: var(--mf-warning-text);
+  --color-warning-subtle: var(--mf-warning-subtle);
+  --color-warning-border: var(--mf-warning-border);
+
+  --color-danger: var(--mf-danger);
+  --color-danger-hover: var(--mf-danger-hover);
+  --color-on-danger: var(--mf-on-danger);
+  --color-danger-text: var(--mf-danger-text);
+  --color-danger-subtle: var(--mf-danger-subtle);
+  --color-danger-border: var(--mf-danger-border);
+
+  --color-info: var(--mf-info);
+  --color-on-info: var(--mf-on-info);
+  --color-info-text: var(--mf-info-text);
+  --color-info-subtle: var(--mf-info-subtle);
+  --color-info-border: var(--mf-info-border);
+
+  --color-focus: var(--mf-focus-ring);
+
+  --color-chart-1: var(--mf-chart-1);
+  --color-chart-2: var(--mf-chart-2);
+  --color-chart-3: var(--mf-chart-3);
+  --color-chart-4: var(--mf-chart-4);
+  --color-chart-5: var(--mf-chart-5);
+  --color-chart-6: var(--mf-chart-6);
+  --color-chart-grid: var(--mf-chart-grid);
+
+  --color-chart-seq-1: var(--mf-chart-seq-1);
+  --color-chart-seq-2: var(--mf-chart-seq-2);
+  --color-chart-seq-3: var(--mf-chart-seq-3);
+  --color-chart-seq-4: var(--mf-chart-seq-4);
+  --color-chart-seq-5: var(--mf-chart-seq-5);
+}
+
+@layer base {
+  /*
+   * Tailwind v4's `border` utility defaults to currentColor, which would paint
+   * every hairline in the text colour. Anchoring it to the token is what makes
+   * a bare `border` correct in both themes.
+   */
+  *,
+  ::before,
+  ::after {
+    border-color: var(--mf-border);
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+    scroll-behavior: smooth;
+    /* Reserving the gutter stops the whole layout shifting by a scrollbar width
+       when a dialog locks scrolling. */
+    scrollbar-gutter: stable;
+  }
+
+  body {
+    background-color: var(--mf-canvas);
+    color: var(--mf-text);
+    font-family: var(--mf-font-sans);
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'cv11';
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    min-height: 100dvh;
+  }
+
+  /*
+   * Keyboard users get a ring on every interactive element; pointer users do
+   * not, because :focus-visible already draws that line for us.
+   */
+  :focus-visible {
+    outline: 2px solid var(--mf-focus-ring);
+    outline-offset: 2px;
+    border-radius: var(--mf-radius-xs);
+  }
+
+  [hidden] {
+    display: none !important;
+  }
+
+  ::selection {
+    background-color: var(--mf-brand-subtle);
+    color: var(--mf-brand-text);
+  }
+
+  /* Native controls inherit the theme rather than the OS default. */
+  input,
+  textarea,
+  select,
+  button {
+    font: inherit;
+    color: inherit;
+  }
+
+  ::placeholder {
+    color: var(--mf-text-muted);
+    opacity: 1;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    ::before,
+    ::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  /*
+   * Visible only once focused. The first tab stop on every page, so keyboard
+   * users can jump past the sidebar instead of walking it on every navigation.
+   */
+  .mf-skip-link {
+    position: absolute;
+    left: var(--mf-space-4);
+    top: var(--mf-space-2);
+    z-index: 100;
+    transform: translateY(-200%);
+    border-radius: var(--mf-radius-md);
+    background-color: var(--mf-brand);
+    color: var(--mf-on-brand);
+    padding: var(--mf-space-2) var(--mf-space-4);
+    font-weight: 600;
+    transition: transform var(--mf-duration-fast) var(--mf-ease-out);
+  }
+
+  .mf-skip-link:focus-visible {
+    transform: translateY(0);
+  }
+
+  /* Announced by screen readers, invisible on screen. */
+  .mf-sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border-width: 0;
+  }
+}
+
+@layer utilities {
+  @keyframes mf-fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  @keyframes mf-pop-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+
+  @keyframes mf-slide-up {
+    from {
+      opacity: 0;
+      transform: translateY(12px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  @keyframes mf-slide-in-right {
+    from {
+      transform: translateX(100%);
+    }
+    to {
+      transform: translateX(0);
+    }
+  }
+
+  @keyframes mf-shimmer {
+    from {
+      background-position: 200% 0;
+    }
+    to {
+      background-position: -200% 0;
+    }
+  }
+
+  .mf-animate-fade-in {
+    animation: mf-fade-in var(--mf-duration-base) var(--mf-ease-out);
+  }
+
+  .mf-animate-pop-in {
+    animation: mf-pop-in var(--mf-duration-base) var(--mf-ease-out);
+  }
+
+  .mf-animate-slide-up {
+    animation: mf-slide-up var(--mf-duration-base) var(--mf-ease-out);
+  }
+
+  .mf-animate-slide-in-right {
+    animation: mf-slide-in-right var(--mf-duration-slow) var(--mf-ease-out);
+  }
+
+  .mf-skeleton {
+    background-image: linear-gradient(
+      90deg,
+      var(--mf-surface-sunken) 25%,
+      var(--mf-surface-hover) 37%,
+      var(--mf-surface-sunken) 63%
+    );
+    background-size: 200% 100%;
+    animation: mf-shimmer 1.6s var(--mf-ease-in-out) infinite;
+  }
+
+  /* Long tables and diagrams scroll inside their own box; the page never does. */
+  .mf-scroll-x {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+  }
+}

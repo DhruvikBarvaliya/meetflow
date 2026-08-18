@@ -1,0 +1,11 @@
+// sequelize-cli entry points. Migrations and seeders are authored as CommonJS
+// (`.cjs`) so the CLI can execute them without a TypeScript build step — the
+// schema must be migratable in a container that only has the compiled output.
+const path = require('path');
+
+module.exports = {
+  config: path.resolve('src', 'database', 'sequelize-cli.config.cjs'),
+  'migrations-path': path.resolve('migrations'),
+  'seeders-path': path.resolve('seeders'),
+  'models-path': path.resolve('src', 'database', 'models'),
+};

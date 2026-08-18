@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="description" content="MeetFlow — scheduling for service businesses and teams." />
+    <meta name="color-scheme" content="light dark" />
+    <title>MeetFlow</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script>
+      /*
+       * Applied before first paint. Resolving the theme in React instead would
+       * paint the light palette for one frame and flash it at dark-mode users.
+       */
+      (function () {
+        try {
+          var stored = window.localStorage.getItem('meetflow.theme');
+          var mode =
+            stored === 'light' || stored === 'dark' || stored === 'system' ? stored : 'system';
+          var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+          var resolved = mode === 'system' ? (prefersDark ? 'dark' : 'light') : mode;
+          document.documentElement.dataset.theme = resolved;
+          document.documentElement.style.colorScheme = resolved;
+        } catch (error) {
+          document.documentElement.dataset.theme = 'light';
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

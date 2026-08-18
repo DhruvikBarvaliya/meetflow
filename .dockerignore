@@ -1,0 +1,90 @@
+# =============================================================================
+# Docker build-context exclusions — repository root
+# =============================================================================
+# The images are built with the repository root as context (the npm workspace
+# tree has to be inside it), so this is the file Docker actually reads.
+# docker/.dockerignore is a mirror kept for anyone who builds with a narrower
+# context; change both together.
+#
+# Two reasons every entry below exists:
+#   1. a smaller context uploads and rebuilds faster;
+#   2. anything not sent cannot be copied into a layer by accident — which is
+#      the only reliable way to keep host secrets and host-built binaries out
+#      of a published image.
+# =============================================================================
+
+# --- Dependencies ------------------------------------------------------------
+# Reinstalled inside the image from package-lock.json so the tree matches the
+# image's platform and Node version rather than the developer's laptop.
+node_modules
+**/node_modules
+.npm
+.pnp
+.pnp.js
+
+# --- Build output ------------------------------------------------------------
+# The builder stage compiles its own; a stale host dist silently shipping to
+# production is exactly the failure this prevents.
+dist
+**/dist
+build
+**/build
+*.tsbuildinfo
+**/*.tsbuildinfo
+
+# --- Version control / CI ----------------------------------------------------
+.git
+.gitignore
+.gitattributes
+.github
+
+# --- Secrets -----------------------------------------------------------------
+# Runtime configuration is injected as environment variables. A .env baked into
+# a layer is readable by anyone who can pull the image, and src/config/env.ts
+# would happily load it in preference to nothing.
+.env
+.env.*
+**/.env
+**/.env.*
+*.pem
+*.key
+
+# --- Tests, fixtures and their artefacts -------------------------------------
+# Never executed in a container, and leaving them out stops seeded test data
+# from being mistaken for production data.
+tests
+**/tests
+coverage
+**/coverage
+.nyc_output
+test-results
+playwright-report
+blob-report
+.playwright
+**/*.test.ts
+**/*.spec.ts
+**/vitest.config.ts
+**/playwright.config.ts
+
+# --- Documentation -----------------------------------------------------------
+docs
+*.md
+**/*.md
+
+# --- Local infrastructure ----------------------------------------------------
+# Compose files are read by the Docker CLI, not by a build. docker/volumes is
+# host state. docker/ itself stays in the context: client.Dockerfile copies
+# docker/nginx.conf.
+docker-compose.yml
+docker-compose.*.yml
+docker/volumes
+.tmp
+
+# --- Editor / OS noise -------------------------------------------------------
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+*.swp
+logs
+*.log
