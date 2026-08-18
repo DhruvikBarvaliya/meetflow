@@ -3,7 +3,7 @@
   "info": {
     "title": "MeetFlow API",
     "version": "1.0.0",
-    "description": "MeetFlow is a multi-tenant scheduling API. Every path below is transcribed from the router, and\nevery request schema is imported from the module that validates it at runtime — so this document\ncannot describe an endpoint the server does not serve, or a payload it would not accept.\n\n### Two surfaces\n\n**`/api/v1/*` — authenticated management.** Mounted behind `authenticate → rate limit →\nrequireTenant`, applied at the router rather than per route so a new endpoint cannot ship\nunauthenticated. One consequence is intentional: an unauthenticated request to an unknown path\nunder `/api/v1` answers **401, not 404**, so the surface cannot be probed to discover which\nendpoints exist.\n\n**`/api/v1/public/*` — unauthenticated booking.** Tenant context comes from a validated\nbooking-link slug, IP rate limits are tight, and only opaque public identifiers are ever exposed.\nAn unknown path here answers 404 rather than falling through into the authenticated chain and\nanswering a misleading 401.\n\n### Choosing a workspace\n\nThe tenant a request operates on is derived from an ACTIVE membership row, never from client\ninput. `X-Business-Id` only *selects* among workspaces the authenticated user already belongs\nto; an id for one they do not resolves to nothing and the request is refused with 404, not 403.\n`GET /api/v1/auth/me` lists the memberships a client may choose from.\n\n### Envelopes\n\nSuccess is `{ \"data\": …, \"meta\"?: … }`; failure is\n`{ \"error\": { \"code\", \"message\", \"details\"?, \"requestId\" } }`. `error.code` is a stable\nmachine code and safe to switch on; `requestId` is echoed in `X-Request-Id` and is the handle\nthat reaches the server-side detail.\n\n### Times\n\nAny field naming a moment must carry its offset (`Z` or `+05:30`); a bare local string would\nbe read in whichever zone the server happens to run in. Any field naming a zone must be an IANA\nidentifier such as `Asia/Kolkata` — a fixed offset cannot express DST and would misplace every\nslot twice a year. Calendar dates are `YYYY-MM-DD` and wall-clock times are `HH:mm`.\n\n### Strictness\n\nEvery request body and query string is `.strict()`: an unrecognised key is a 422, never a\nsilently ignored field. That is deliberate — a stray `businessId` must be a loud rejection\nrather than an attempt to write into another tenant that a later refactor might start honouring.",
+    "description": "MeetFlow is a multi-tenant scheduling API. Every path below is transcribed from the router, and\nevery request schema is imported from the module that validates it at runtime — so this document\ncannot describe an endpoint the server does not serve, or a payload it would not accept.\n\n### Three surfaces\n\n**`/api/v1/*` — authenticated management.** Mounted behind `authenticate → rate limit →\nrequireTenant`, applied at the router rather than per route so a new endpoint cannot ship\nunauthenticated. One consequence is intentional: an unauthenticated request to an unknown path\nunder `/api/v1` answers **401, not 404**, so the surface cannot be probed to discover which\nendpoints exist.\n\n**`/api/v1/public/*` — unauthenticated booking.** Tenant context comes from a validated\nbooking-link slug, IP rate limits are tight, and only opaque public identifiers are ever exposed.\nAn unknown path here answers 404 rather than falling through into the authenticated chain and\nanswering a misleading 401.\n\n**`/api/v1/admin/*` — platform administration.** Mounted behind `authenticate → rate limit →\nrequirePlatformAdmin` and deliberately **not** behind `requireTenant`: an operator holds no\nmembership in the workspaces they administer, so tenant resolution would refuse every call. It is\nthe only surface that reads across tenants, and what it reads is workspaces, platform accounts and\ncounts — never a workspace's customers, appointments or notes.\n\n### Choosing a workspace\n\nThe tenant a request operates on is derived from an ACTIVE membership row, never from client\ninput. `X-Business-Id` only *selects* among workspaces the authenticated user already belongs\nto; an id for one they do not resolves to nothing and the request is refused with 404, not 403.\n`GET /api/v1/auth/me` lists the memberships a client may choose from.\n\n### Envelopes\n\nSuccess is `{ \"data\": …, \"meta\"?: … }`; failure is\n`{ \"error\": { \"code\", \"message\", \"details\"?, \"requestId\" } }`. `error.code` is a stable\nmachine code and safe to switch on; `requestId` is echoed in `X-Request-Id` and is the handle\nthat reaches the server-side detail.\n\n### Times\n\nAny field naming a moment must carry its offset (`Z` or `+05:30`); a bare local string would\nbe read in whichever zone the server happens to run in. Any field naming a zone must be an IANA\nidentifier such as `Asia/Kolkata` — a fixed offset cannot express DST and would misplace every\nslot twice a year. Calendar dates are `YYYY-MM-DD` and wall-clock times are `HH:mm`.\n\n### Strictness\n\nEvery request body and query string is `.strict()`: an unrecognised key is a 422, never a\nsilently ignored field. That is deliberate — a stray `businessId` must be a loud rejection\nrather than an attempt to write into another tenant that a later refactor might start honouring.",
     "license": {
       "name": "UNLICENSED"
     }
@@ -76,6 +76,10 @@
       "description": "The same rows listed rather than aggregated, plus CSV export."
     },
     {
+      "name": "Platform Admin",
+      "description": "Operating the platform itself, and the only endpoints that read across tenants. They require `platformRole = ADMIN` and are not tenant-scoped — X-Business-Id plays no part here, because an operator holds no membership in the workspaces they administer. What they expose is workspaces, platform accounts and counts; never customer names, contact details, appointment contents or notes. Running the platform is no reason to read a clinic's patient list, and the shape of these responses is what enforces that."
+    },
+    {
       "name": "Public Booking",
       "description": "The unauthenticated booking surface. Tenant context comes from the booking-link slug in the path; existing bookings are addressed only by their opaque apt_ handle."
     }
@@ -111,7 +115,9 @@
             "description": "The zod issue code, when the detail came from validation."
           }
         },
-        "required": ["message"],
+        "required": [
+          "message"
+        ],
         "description": "One structured, non-sensitive reason a request was rejected."
       },
       "ErrorEnvelope": {
@@ -175,10 +181,16 @@
                 "description": "Non-sensitive context for the failure — `retryAfterSeconds` on a 429, the `required` permission keys on a 403, `from`/`to` on an illegal transition."
               }
             },
-            "required": ["code", "message", "requestId"]
+            "required": [
+              "code",
+              "message",
+              "requestId"
+            ]
           }
         },
-        "required": ["error"],
+        "required": [
+          "error"
+        ],
         "description": "The shape of every failed response."
       },
       "PageMeta": {
@@ -204,7 +216,13 @@
             "type": "boolean"
           }
         },
-        "required": ["page", "pageSize", "totalItems", "totalPages", "hasNextPage"],
+        "required": [
+          "page",
+          "pageSize",
+          "totalItems",
+          "totalPages",
+          "hasNextPage"
+        ],
         "description": "Pagination counters attached to every list response. Individual endpoints may add further keys alongside these."
       },
       "SuccessEnvelope": {
@@ -223,7 +241,9 @@
           }
         },
         "description": "The shape of every successful response that has a body.",
-        "required": ["data"]
+        "required": [
+          "data"
+        ]
       },
       "PaginatedEnvelope": {
         "type": "object",
@@ -239,7 +259,10 @@
             "$ref": "#/components/schemas/PageMeta"
           }
         },
-        "required": ["data", "meta"],
+        "required": [
+          "data",
+          "meta"
+        ],
         "description": "The success envelope as a list endpoint fills it in."
       },
       "HealthStatus": {
@@ -247,7 +270,9 @@
         "properties": {
           "status": {
             "type": "string",
-            "enum": ["ok"]
+            "enum": [
+              "ok"
+            ]
           },
           "service": {
             "type": "string",
@@ -266,7 +291,13 @@
             "format": "date-time"
           }
         },
-        "required": ["status", "service", "env", "uptimeSeconds", "timestamp"],
+        "required": [
+          "status",
+          "service",
+          "env",
+          "uptimeSeconds",
+          "timestamp"
+        ],
         "description": "Answered without touching any dependency, so a database blip cannot make an orchestrator kill healthy pods."
       },
       "DependencyCheck": {
@@ -288,7 +319,11 @@
             "description": "Whether losing this dependency makes the instance unable to serve traffic."
           }
         },
-        "required": ["ok", "latencyMs", "required"],
+        "required": [
+          "ok",
+          "latencyMs",
+          "required"
+        ],
         "description": "The result of one readiness probe."
       },
       "ReadinessStatus": {
@@ -296,7 +331,11 @@
         "properties": {
           "status": {
             "type": "string",
-            "enum": ["ready", "degraded", "unavailable"],
+            "enum": [
+              "ready",
+              "degraded",
+              "unavailable"
+            ],
             "description": "`degraded` means Redis is down but PostgreSQL is up — caching, rate limiting and queues all fall back, so the instance keeps taking traffic and still answers 200."
           },
           "checks": {
@@ -309,14 +348,21 @@
                 "$ref": "#/components/schemas/DependencyCheck"
               }
             },
-            "required": ["database", "redis"]
+            "required": [
+              "database",
+              "redis"
+            ]
           },
           "timestamp": {
             "type": "string",
             "format": "date-time"
           }
         },
-        "required": ["status", "checks", "timestamp"],
+        "required": [
+          "status",
+          "checks",
+          "timestamp"
+        ],
         "description": "Whether this instance should receive traffic."
       },
       "RegisterRequest": {
@@ -352,7 +398,12 @@
             "type": "string"
           }
         },
-        "required": ["email", "password", "firstName", "lastName"],
+        "required": [
+          "email",
+          "password",
+          "firstName",
+          "lastName"
+        ],
         "additionalProperties": false
       },
       "LoginRequest": {
@@ -369,7 +420,10 @@
             "minLength": 1
           }
         },
-        "required": ["email", "password"],
+        "required": [
+          "email",
+          "password"
+        ],
         "additionalProperties": false
       },
       "RefreshRequest": {
@@ -391,7 +445,9 @@
             "maxLength": 200
           }
         },
-        "required": ["token"],
+        "required": [
+          "token"
+        ],
         "additionalProperties": false
       },
       "RequestPasswordResetRequest": {
@@ -404,7 +460,9 @@
             "format": "email"
           }
         },
-        "required": ["email"],
+        "required": [
+          "email"
+        ],
         "additionalProperties": false
       },
       "ResetPasswordRequest": {
@@ -421,7 +479,10 @@
             "maxLength": 128
           }
         },
-        "required": ["token", "password"],
+        "required": [
+          "token",
+          "password"
+        ],
         "additionalProperties": false
       },
       "ChangePasswordRequest": {
@@ -437,7 +498,10 @@
             "maxLength": 128
           }
         },
-        "required": ["currentPassword", "newPassword"],
+        "required": [
+          "currentPassword",
+          "newPassword"
+        ],
         "additionalProperties": false
       },
       "CreateWorkspaceRequest": {
@@ -493,7 +557,10 @@
             "type": "boolean"
           }
         },
-        "required": ["name", "timezone"],
+        "required": [
+          "name",
+          "timezone"
+        ],
         "additionalProperties": false
       },
       "UpdateWorkspaceRequest": {
@@ -663,7 +730,12 @@
           },
           "type": {
             "type": "string",
-            "enum": ["PHYSICAL", "VIRTUAL", "PHONE", "CUSTOMER_SITE"],
+            "enum": [
+              "PHYSICAL",
+              "VIRTUAL",
+              "PHONE",
+              "CUSTOMER_SITE"
+            ],
             "default": "PHYSICAL"
           },
           "description": {
@@ -740,7 +812,9 @@
             "default": true
           }
         },
-        "required": ["name"],
+        "required": [
+          "name"
+        ],
         "additionalProperties": false
       },
       "UpdateLocationRequest": {
@@ -759,7 +833,12 @@
           },
           "type": {
             "type": "string",
-            "enum": ["PHYSICAL", "VIRTUAL", "PHONE", "CUSTOMER_SITE"]
+            "enum": [
+              "PHYSICAL",
+              "VIRTUAL",
+              "PHONE",
+              "CUSTOMER_SITE"
+            ]
           },
           "description": {
             "type": "string",
@@ -856,13 +935,20 @@
           },
           "assignmentStrategy": {
             "type": "string",
-            "enum": ["ROUND_ROBIN", "COLLECTIVE", "POOLED", "SMART_MATCH"]
+            "enum": [
+              "ROUND_ROBIN",
+              "COLLECTIVE",
+              "POOLED",
+              "SMART_MATCH"
+            ]
           },
           "isActive": {
             "type": "boolean"
           }
         },
-        "required": ["name"],
+        "required": [
+          "name"
+        ],
         "additionalProperties": false
       },
       "UpdateTeamRequest": {
@@ -886,7 +972,12 @@
           },
           "assignmentStrategy": {
             "type": "string",
-            "enum": ["ROUND_ROBIN", "COLLECTIVE", "POOLED", "SMART_MATCH"]
+            "enum": [
+              "ROUND_ROBIN",
+              "COLLECTIVE",
+              "POOLED",
+              "SMART_MATCH"
+            ]
           },
           "isActive": {
             "type": "boolean"
@@ -912,7 +1003,9 @@
             "maximum": 1000
           }
         },
-        "required": ["staffProfileId"],
+        "required": [
+          "staffProfileId"
+        ],
         "additionalProperties": false
       },
       "UpdateTeamMemberRequest": {
@@ -1023,7 +1116,9 @@
             "type": "boolean"
           }
         },
-        "required": ["membershipId"],
+        "required": [
+          "membershipId"
+        ],
         "additionalProperties": false
       },
       "UpdateStaffRequest": {
@@ -1125,7 +1220,9 @@
             "maxItems": 200
           }
         },
-        "required": ["serviceIds"],
+        "required": [
+          "serviceIds"
+        ],
         "additionalProperties": false
       },
       "CreateServiceCategoryRequest": {
@@ -1163,7 +1260,9 @@
             "default": true
           }
         },
-        "required": ["name"],
+        "required": [
+          "name"
+        ],
         "additionalProperties": false
       },
       "UpdateServiceCategoryRequest": {
@@ -1284,7 +1383,12 @@
           },
           "assignmentStrategy": {
             "type": "string",
-            "enum": ["ROUND_ROBIN", "COLLECTIVE", "POOLED", "SMART_MATCH"],
+            "enum": [
+              "ROUND_ROBIN",
+              "COLLECTIVE",
+              "POOLED",
+              "SMART_MATCH"
+            ],
             "default": "SMART_MATCH"
           },
           "color": {
@@ -1307,7 +1411,10 @@
             "default": 0
           }
         },
-        "required": ["name", "durationMinutes"],
+        "required": [
+          "name",
+          "durationMinutes"
+        ],
         "additionalProperties": false
       },
       "UpdateServiceRequest": {
@@ -1390,7 +1497,12 @@
           },
           "assignmentStrategy": {
             "type": "string",
-            "enum": ["ROUND_ROBIN", "COLLECTIVE", "POOLED", "SMART_MATCH"]
+            "enum": [
+              "ROUND_ROBIN",
+              "COLLECTIVE",
+              "POOLED",
+              "SMART_MATCH"
+            ]
           },
           "color": {
             "type": "string",
@@ -1423,7 +1535,9 @@
             "maxItems": 200
           }
         },
-        "required": ["staffProfileIds"],
+        "required": [
+          "staffProfileIds"
+        ],
         "additionalProperties": false
       },
       "ReplaceServiceLocationsRequest": {
@@ -1438,7 +1552,9 @@
             "maxItems": 100
           }
         },
-        "required": ["locationIds"],
+        "required": [
+          "locationIds"
+        ],
         "additionalProperties": false
       },
       "CreateResourceRequest": {
@@ -1457,7 +1573,14 @@
           },
           "type": {
             "type": "string",
-            "enum": ["ROOM", "EQUIPMENT", "VEHICLE", "DESK", "FACILITY", "OTHER"],
+            "enum": [
+              "ROOM",
+              "EQUIPMENT",
+              "VEHICLE",
+              "DESK",
+              "FACILITY",
+              "OTHER"
+            ],
             "default": "ROOM"
           },
           "locationId": {
@@ -1486,7 +1609,9 @@
             "default": true
           }
         },
-        "required": ["name"],
+        "required": [
+          "name"
+        ],
         "additionalProperties": false
       },
       "UpdateResourceRequest": {
@@ -1505,7 +1630,14 @@
           },
           "type": {
             "type": "string",
-            "enum": ["ROOM", "EQUIPMENT", "VEHICLE", "DESK", "FACILITY", "OTHER"]
+            "enum": [
+              "ROOM",
+              "EQUIPMENT",
+              "VEHICLE",
+              "DESK",
+              "FACILITY",
+              "OTHER"
+            ]
           },
           "locationId": {
             "type": "string",
@@ -1549,7 +1681,14 @@
                 "resourceType": {
                   "type": "string",
                   "nullable": true,
-                  "enum": ["ROOM", "EQUIPMENT", "VEHICLE", "DESK", "FACILITY", "OTHER"]
+                  "enum": [
+                    "ROOM",
+                    "EQUIPMENT",
+                    "VEHICLE",
+                    "DESK",
+                    "FACILITY",
+                    "OTHER"
+                  ]
                 },
                 "quantity": {
                   "type": "integer",
@@ -1567,7 +1706,9 @@
             "maxItems": 50
           }
         },
-        "required": ["requirements"],
+        "required": [
+          "requirements"
+        ],
         "additionalProperties": false
       },
       "CreateCustomerRequest": {
@@ -1656,10 +1797,17 @@
           },
           "status": {
             "type": "string",
-            "enum": ["ACTIVE", "BLOCKED", "ARCHIVED"]
+            "enum": [
+              "ACTIVE",
+              "BLOCKED",
+              "ARCHIVED"
+            ]
           }
         },
-        "required": ["firstName", "email"],
+        "required": [
+          "firstName",
+          "email"
+        ],
         "additionalProperties": false
       },
       "UpdateCustomerRequest": {
@@ -1745,7 +1893,11 @@
           },
           "status": {
             "type": "string",
-            "enum": ["ACTIVE", "BLOCKED", "ARCHIVED"]
+            "enum": [
+              "ACTIVE",
+              "BLOCKED",
+              "ARCHIVED"
+            ]
           }
         },
         "additionalProperties": false
@@ -1782,13 +1934,19 @@
                   "default": true
                 }
               },
-              "required": ["dayOfWeek", "startTime", "endTime"],
+              "required": [
+                "dayOfWeek",
+                "startTime",
+                "endTime"
+              ],
               "additionalProperties": false
             },
             "maxItems": 70
           }
         },
-        "required": ["hours"],
+        "required": [
+          "hours"
+        ],
         "additionalProperties": false
       },
       "ReplaceStaffAvailabilityRulesRequest": {
@@ -1833,13 +1991,19 @@
                   "default": true
                 }
               },
-              "required": ["dayOfWeek", "startTime", "endTime"],
+              "required": [
+                "dayOfWeek",
+                "startTime",
+                "endTime"
+              ],
               "additionalProperties": false
             },
             "maxItems": 70
           }
         },
-        "required": ["rules"],
+        "required": [
+          "rules"
+        ],
         "additionalProperties": false
       },
       "CreateAvailabilityOverrideRequest": {
@@ -1847,7 +2011,12 @@
         "properties": {
           "scope": {
             "type": "string",
-            "enum": ["BUSINESS", "LOCATION", "STAFF", "RESOURCE"]
+            "enum": [
+              "BUSINESS",
+              "LOCATION",
+              "STAFF",
+              "RESOURCE"
+            ]
           },
           "staffProfileId": {
             "type": "string",
@@ -1906,7 +2075,11 @@
             "default": null
           }
         },
-        "required": ["scope", "date", "isAvailable"],
+        "required": [
+          "scope",
+          "date",
+          "isAvailable"
+        ],
         "additionalProperties": false
       },
       "CreateHolidayRequest": {
@@ -1939,7 +2112,10 @@
             "default": true
           }
         },
-        "required": ["name", "date"],
+        "required": [
+          "name",
+          "date"
+        ],
         "additionalProperties": false
       },
       "CreateBlackoutRequest": {
@@ -1947,7 +2123,12 @@
         "properties": {
           "scope": {
             "type": "string",
-            "enum": ["BUSINESS", "LOCATION", "STAFF", "RESOURCE"]
+            "enum": [
+              "BUSINESS",
+              "LOCATION",
+              "STAFF",
+              "RESOURCE"
+            ]
           },
           "staffProfileId": {
             "type": "string",
@@ -1977,7 +2158,15 @@
           },
           "reason": {
             "type": "string",
-            "enum": ["LEAVE", "SICK", "MAINTENANCE", "CLOSURE", "TRAINING", "EVENT", "CUSTOM"],
+            "enum": [
+              "LEAVE",
+              "SICK",
+              "MAINTENANCE",
+              "CLOSURE",
+              "TRAINING",
+              "EVENT",
+              "CUSTOM"
+            ],
             "default": "CUSTOM"
           },
           "note": {
@@ -1987,7 +2176,11 @@
             "default": null
           }
         },
-        "required": ["scope", "startsAt", "endsAt"],
+        "required": [
+          "scope",
+          "startsAt",
+          "endsAt"
+        ],
         "additionalProperties": false
       },
       "CreateBookingLinkRequest": {
@@ -2011,7 +2204,12 @@
           },
           "type": {
             "type": "string",
-            "enum": ["SINGLE_SERVICE", "CATALOG", "TEAM", "STAFF"],
+            "enum": [
+              "SINGLE_SERVICE",
+              "CATALOG",
+              "TEAM",
+              "STAFF"
+            ],
             "default": "CATALOG"
           },
           "serviceId": {
@@ -2096,7 +2294,11 @@
                   "default": []
                 }
               },
-              "required": ["key", "label", "type"],
+              "required": [
+                "key",
+                "label",
+                "type"
+              ],
               "additionalProperties": false
             },
             "maxItems": 30,
@@ -2126,7 +2328,9 @@
             "default": true
           }
         },
-        "required": ["name"],
+        "required": [
+          "name"
+        ],
         "additionalProperties": false
       },
       "UpdateBookingLinkRequest": {
@@ -2150,7 +2354,12 @@
           },
           "type": {
             "type": "string",
-            "enum": ["SINGLE_SERVICE", "CATALOG", "TEAM", "STAFF"]
+            "enum": [
+              "SINGLE_SERVICE",
+              "CATALOG",
+              "TEAM",
+              "STAFF"
+            ]
           },
           "serviceId": {
             "type": "string",
@@ -2224,7 +2433,11 @@
                   "default": []
                 }
               },
-              "required": ["key", "label", "type"],
+              "required": [
+                "key",
+                "label",
+                "type"
+              ],
               "additionalProperties": false
             },
             "maxItems": 30
@@ -2265,7 +2478,9 @@
             "maxItems": 100
           }
         },
-        "required": ["serviceIds"],
+        "required": [
+          "serviceIds"
+        ],
         "additionalProperties": false
       },
       "CreateAppointmentRequest": {
@@ -2321,7 +2536,10 @@
                 "maxLength": 30
               }
             },
-            "required": ["firstName", "email"],
+            "required": [
+              "firstName",
+              "email"
+            ],
             "additionalProperties": false
           },
           "customerNotes": {
@@ -2336,7 +2554,13 @@
             }
           }
         },
-        "required": ["serviceId", "staffProfileId", "startsAt", "timezone", "customer"],
+        "required": [
+          "serviceId",
+          "staffProfileId",
+          "startsAt",
+          "timezone",
+          "customer"
+        ],
         "additionalProperties": false
       },
       "UpdateAppointmentRequest": {
@@ -2381,7 +2605,9 @@
             "maxLength": 500
           }
         },
-        "required": ["startsAt"],
+        "required": [
+          "startsAt"
+        ],
         "additionalProperties": false
       },
       "AppointmentReasonRequest": {
@@ -2462,7 +2688,11 @@
           },
           "notifyChannel": {
             "type": "string",
-            "enum": ["EMAIL", "SMS", "NONE"],
+            "enum": [
+              "EMAIL",
+              "SMS",
+              "NONE"
+            ],
             "default": "EMAIL"
           },
           "expiresAt": {
@@ -2476,7 +2706,12 @@
             "maxLength": 2000
           }
         },
-        "required": ["customerId", "serviceId", "earliestDate", "latestDate"],
+        "required": [
+          "customerId",
+          "serviceId",
+          "earliestDate",
+          "latestDate"
+        ],
         "additionalProperties": false
       },
       "UpdateWaitlistEntryRequest": {
@@ -2527,7 +2762,11 @@
           },
           "notifyChannel": {
             "type": "string",
-            "enum": ["EMAIL", "SMS", "NONE"]
+            "enum": [
+              "EMAIL",
+              "SMS",
+              "NONE"
+            ]
           },
           "expiresAt": {
             "type": "string",
@@ -2556,7 +2795,64 @@
             "format": "date-time"
           }
         },
-        "required": ["startsAt"],
+        "required": [
+          "startsAt"
+        ],
+        "additionalProperties": false
+      },
+      "UpdateWorkspaceStatusRequest": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ACTIVE",
+              "SUSPENDED",
+              "ARCHIVED"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "UpdateUserStatusRequest": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ACTIVE",
+              "SUSPENDED",
+              "DEACTIVATED"
+            ]
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "additionalProperties": false
+      },
+      "UpdatePlatformRoleRequest": {
+        "type": "object",
+        "properties": {
+          "platformRole": {
+            "type": "string",
+            "enum": [
+              "ADMIN",
+              "USER"
+            ]
+          }
+        },
+        "required": [
+          "platformRole"
+        ],
         "additionalProperties": false
       },
       "CreatePublicBookingRequest": {
@@ -2607,7 +2903,10 @@
                 "maxLength": 30
               }
             },
-            "required": ["firstName", "email"],
+            "required": [
+              "firstName",
+              "email"
+            ],
             "additionalProperties": false
           },
           "customerNotes": {
@@ -2623,7 +2922,12 @@
             "default": {}
           }
         },
-        "required": ["serviceId", "startsAt", "timezone", "customer"],
+        "required": [
+          "serviceId",
+          "startsAt",
+          "timezone",
+          "customer"
+        ],
         "additionalProperties": false
       },
       "ReschedulePublicBookingRequest": {
@@ -2639,7 +2943,9 @@
             "maxLength": 500
           }
         },
-        "required": ["startsAt"],
+        "required": [
+          "startsAt"
+        ],
         "additionalProperties": false
       },
       "CancelPublicBookingRequest": {
@@ -2689,7 +2995,9 @@
   "paths": {
     "/health": {
       "get": {
-        "tags": ["Health"],
+        "tags": [
+          "Health"
+        ],
         "operationId": "health.liveness",
         "summary": "Liveness probe",
         "description": "Answers \"is this process alive?\". Touches no dependency by design, so a database or Redis blip cannot cause an orchestrator to restart otherwise-healthy instances.",
@@ -2709,7 +3017,9 @@
     },
     "/ready": {
       "get": {
-        "tags": ["Health"],
+        "tags": [
+          "Health"
+        ],
         "operationId": "health.readiness",
         "summary": "Readiness probe",
         "description": "Answers \"should this process receive traffic?\". PostgreSQL is required and Redis is not, so losing Redis reports `degraded` and still answers 200 while losing PostgreSQL answers 503 and takes the instance out of the load balancer.",
@@ -2739,7 +3049,9 @@
     },
     "/version": {
       "get": {
-        "tags": ["Health"],
+        "tags": [
+          "Health"
+        ],
         "operationId": "health.version",
         "summary": "Build and version metadata",
         "description": "Identifies the service, API version, environment and Node runtime — useful when several revisions run side by side.",
@@ -2759,7 +3071,9 @@
     },
     "/api/v1/auth/password-policy": {
       "get": {
-        "tags": ["Auth"],
+        "tags": [
+          "Auth"
+        ],
         "operationId": "auth.passwordPolicy",
         "summary": "Read the password policy",
         "description": "The rules a password must satisfy, so a sign-up form can enforce them before submitting rather than round-tripping a 422.",
@@ -2799,7 +3113,9 @@
     },
     "/api/v1/auth/register": {
       "post": {
-        "tags": ["Auth"],
+        "tags": [
+          "Auth"
+        ],
         "operationId": "auth.register",
         "summary": "Create an account",
         "description": "Creates a user and immediately issues a session. A verification email is queued rather than sent inline, so a slow mail provider cannot slow registration and a failed send cannot roll back a created account. The body is strict: a stray `platformRole` is a loud 422, never a silently ignored privilege escalation.",
@@ -2869,7 +3185,9 @@
     },
     "/api/v1/auth/login": {
       "post": {
-        "tags": ["Auth"],
+        "tags": [
+          "Auth"
+        ],
         "operationId": "auth.login",
         "summary": "Sign in",
         "description": "Exchanges an email and password for a session. Rate limited on IP *and* submitted email, so neither spraying one password across many accounts nor many passwords at one account gets a free pass.",
@@ -2939,7 +3257,9 @@
     },
     "/api/v1/auth/refresh": {
       "post": {
-        "tags": ["Auth"],
+        "tags": [
+          "Auth"
+        ],
         "operationId": "auth.refresh",
         "summary": "Exchange a refresh token for a new session",
         "description": "The token may travel in the body or in the httpOnly cookie; the body field is therefore optional. Rate limited like the credential routes: this is the endpoint an attacker holding a stolen token would hammer, and reuse detection is cheaper when it is not flooded.",
@@ -3009,7 +3329,9 @@
     },
     "/api/v1/auth/logout": {
       "post": {
-        "tags": ["Auth"],
+        "tags": [
+          "Auth"
+        ],
         "operationId": "auth.logout",
         "summary": "Revoke one session",
         "description": "Revokes the presented refresh token and clears the cookie. Answers 204 whether or not a token was supplied, so a client can always end a session cleanly.",
@@ -3062,7 +3384,9 @@
     },
     "/api/v1/auth/logout-all": {
       "post": {
-        "tags": ["Auth"],
+        "tags": [
+          "Auth"
+        ],
         "operationId": "auth.logoutAll",
         "summary": "Revoke every session for the current user",
         "description": "Signs the account out everywhere, on every device.",
@@ -3117,7 +3441,9 @@
     },
     "/api/v1/auth/me": {
       "get": {
-        "tags": ["Auth"],
+        "tags": [
+          "Auth"
+        ],
         "operationId": "auth.me",
         "summary": "Read the authenticated user",
         "description": "Returns the user, every ACTIVE membership they hold, and — once a workspace has been selected for the request — the active workspace with the caller's effective permission keys. This is where a client discovers which value to send as X-Business-Id.",
@@ -3172,7 +3498,9 @@
     },
     "/api/v1/auth/verify-email": {
       "post": {
-        "tags": ["Auth"],
+        "tags": [
+          "Auth"
+        ],
         "operationId": "auth.verifyEmail",
         "summary": "Confirm an email address",
         "description": "Consumes the single-use token from the verification email.",
@@ -3242,7 +3570,9 @@
     },
     "/api/v1/auth/password-reset/request": {
       "post": {
-        "tags": ["Auth"],
+        "tags": [
+          "Auth"
+        ],
         "operationId": "auth.requestPasswordReset",
         "summary": "Request a password reset email",
         "description": "Always answers the same way whether or not the address is registered, so the endpoint cannot be used to enumerate accounts.",
@@ -3302,7 +3632,9 @@
     },
     "/api/v1/auth/password-reset/confirm": {
       "post": {
-        "tags": ["Auth"],
+        "tags": [
+          "Auth"
+        ],
         "operationId": "auth.resetPassword",
         "summary": "Set a new password from a reset token",
         "description": "Consumes the single-use token and revokes existing sessions.",
@@ -3372,7 +3704,9 @@
     },
     "/api/v1/auth/change-password": {
       "post": {
-        "tags": ["Auth"],
+        "tags": [
+          "Auth"
+        ],
         "operationId": "auth.changePassword",
         "summary": "Change the password of the signed-in user",
         "description": "Requires the current password, and revokes existing sessions on success.",
@@ -3447,7 +3781,9 @@
     },
     "/api/v1/workspaces": {
       "post": {
-        "tags": ["Workspace"],
+        "tags": [
+          "Workspace"
+        ],
         "operationId": "workspace.create",
         "summary": "Create a workspace",
         "description": "Authenticated but not tenant-scoped, and mounted outside the management router for that reason: requiring an existing membership to create your first workspace would make onboarding impossible. The caller becomes its owner.",
@@ -3532,7 +3868,9 @@
     },
     "/api/v1/workspaces/slug-available": {
       "get": {
-        "tags": ["Workspace"],
+        "tags": [
+          "Workspace"
+        ],
         "operationId": "workspace.checkSlug",
         "summary": "Check whether a workspace slug is free",
         "description": "Lets a sign-up form report a clash before submitting the whole form.",
@@ -3609,7 +3947,9 @@
     },
     "/api/v1/workspace": {
       "get": {
-        "tags": ["Workspace"],
+        "tags": [
+          "Workspace"
+        ],
         "operationId": "workspace.show",
         "summary": "Read the current workspace",
         "description": "The workspace resolved from the caller's membership. Requires `workspace:read`.",
@@ -3697,7 +4037,9 @@
         }
       },
       "patch": {
-        "tags": ["Workspace"],
+        "tags": [
+          "Workspace"
+        ],
         "operationId": "workspace.update",
         "summary": "Amend the current workspace",
         "description": "Requires `workspace:update`. `businessId` is absent from the body and always will be: the tenant comes from the membership, so accepting one here would be the client-supplied tenant id the architecture forbids.",
@@ -3807,7 +4149,9 @@
     },
     "/api/v1/workspace/settings": {
       "get": {
-        "tags": ["Workspace"],
+        "tags": [
+          "Workspace"
+        ],
         "operationId": "workspace.showSettings",
         "summary": "Read the booking policy",
         "description": "Slot interval, buffers, notice, horizon, cancellation and reschedule deadlines, approval and waitlist behaviour. Requires `workspace:read`.",
@@ -3895,7 +4239,9 @@
         }
       },
       "patch": {
-        "tags": ["Workspace"],
+        "tags": [
+          "Workspace"
+        ],
         "operationId": "workspace.updateSettings",
         "summary": "Amend the booking policy",
         "description": "Requires `workspace:settings:manage`. Every field is optional so a client can change one value without echoing the rest back.",
@@ -4005,7 +4351,9 @@
     },
     "/api/v1/workspace/members": {
       "get": {
-        "tags": ["Workspace"],
+        "tags": [
+          "Workspace"
+        ],
         "operationId": "workspace.listMembers",
         "summary": "List workspace members",
         "description": "Every membership in the workspace with its role. Requires `members:read`.",
@@ -4095,7 +4443,9 @@
     },
     "/api/v1/workspace/roles": {
       "get": {
-        "tags": ["Workspace"],
+        "tags": [
+          "Workspace"
+        ],
         "operationId": "workspace.listRoles",
         "summary": "List assignable roles",
         "description": "The roles available in this workspace and the permissions each carries. Requires `roles:read`.",
@@ -4185,7 +4535,9 @@
     },
     "/api/v1/locations": {
       "get": {
-        "tags": ["Locations"],
+        "tags": [
+          "Locations"
+        ],
         "operationId": "locations.list",
         "summary": "List locations",
         "description": "Requires `locations:read`.",
@@ -4219,7 +4571,10 @@
           {
             "schema": {
               "type": "string",
-              "enum": ["true", "false"]
+              "enum": [
+                "true",
+                "false"
+              ]
             },
             "required": false,
             "name": "isActive",
@@ -4228,7 +4583,12 @@
           {
             "schema": {
               "type": "string",
-              "enum": ["PHYSICAL", "VIRTUAL", "PHONE", "CUSTOMER_SITE"]
+              "enum": [
+                "PHYSICAL",
+                "VIRTUAL",
+                "PHONE",
+                "CUSTOMER_SITE"
+              ]
             },
             "required": false,
             "name": "type",
@@ -4312,7 +4672,9 @@
         }
       },
       "post": {
-        "tags": ["Locations"],
+        "tags": [
+          "Locations"
+        ],
         "operationId": "locations.create",
         "summary": "Create a location",
         "description": "Requires `locations:manage`. `timezone` may be omitted, in which case the location inherits the workspace zone rather than the column's UTC default.",
@@ -4422,7 +4784,9 @@
     },
     "/api/v1/locations/{id}": {
       "get": {
-        "tags": ["Locations"],
+        "tags": [
+          "Locations"
+        ],
         "operationId": "locations.get",
         "summary": "Read one location",
         "description": "Requires `locations:read`.",
@@ -4519,7 +4883,9 @@
         }
       },
       "patch": {
-        "tags": ["Locations"],
+        "tags": [
+          "Locations"
+        ],
         "operationId": "locations.update",
         "summary": "Amend a location",
         "description": "Requires `locations:manage`. At least one field must be present — an empty patch would write an audit row describing no change at all.",
@@ -4636,7 +5002,9 @@
         }
       },
       "delete": {
-        "tags": ["Locations"],
+        "tags": [
+          "Locations"
+        ],
         "operationId": "locations.remove",
         "summary": "Delete a location",
         "description": "Requires `locations:manage`.",
@@ -4738,7 +5106,9 @@
     },
     "/api/v1/teams": {
       "get": {
-        "tags": ["Teams"],
+        "tags": [
+          "Teams"
+        ],
         "operationId": "teams.list",
         "summary": "List teams",
         "description": "Requires `teams:read`.",
@@ -4782,7 +5152,10 @@
           {
             "schema": {
               "type": "string",
-              "enum": ["true", "false"]
+              "enum": [
+                "true",
+                "false"
+              ]
             },
             "required": false,
             "name": "isActive",
@@ -4791,7 +5164,12 @@
           {
             "schema": {
               "type": "string",
-              "enum": ["ROUND_ROBIN", "COLLECTIVE", "POOLED", "SMART_MATCH"]
+              "enum": [
+                "ROUND_ROBIN",
+                "COLLECTIVE",
+                "POOLED",
+                "SMART_MATCH"
+              ]
             },
             "required": false,
             "name": "assignmentStrategy",
@@ -4875,7 +5253,9 @@
         }
       },
       "post": {
-        "tags": ["Teams"],
+        "tags": [
+          "Teams"
+        ],
         "operationId": "teams.create",
         "summary": "Create a team",
         "description": "Requires `teams:manage`. The slug is derived from the name when omitted, and validated rather than silently rewritten when supplied.",
@@ -4985,7 +5365,9 @@
     },
     "/api/v1/teams/{id}": {
       "get": {
-        "tags": ["Teams"],
+        "tags": [
+          "Teams"
+        ],
         "operationId": "teams.get",
         "summary": "Read one team",
         "description": "Requires `teams:read`.",
@@ -5082,7 +5464,9 @@
         }
       },
       "patch": {
-        "tags": ["Teams"],
+        "tags": [
+          "Teams"
+        ],
         "operationId": "teams.update",
         "summary": "Amend a team",
         "description": "Requires `teams:manage`. At least one field must be present.",
@@ -5199,7 +5583,9 @@
         }
       },
       "delete": {
-        "tags": ["Teams"],
+        "tags": [
+          "Teams"
+        ],
         "operationId": "teams.remove",
         "summary": "Delete a team",
         "description": "Requires `teams:manage`.",
@@ -5301,7 +5687,9 @@
     },
     "/api/v1/teams/{id}/members": {
       "post": {
-        "tags": ["Teams"],
+        "tags": [
+          "Teams"
+        ],
         "operationId": "teams.addMember",
         "summary": "Add a staff member to a team",
         "description": "Requires `teams:manage`. `weight` biases round-robin assignment; `priority` breaks ties, lowest first.",
@@ -5420,7 +5808,9 @@
     },
     "/api/v1/teams/{id}/members/{memberId}": {
       "patch": {
-        "tags": ["Teams"],
+        "tags": [
+          "Teams"
+        ],
         "operationId": "teams.updateMember",
         "summary": "Amend a team member",
         "description": "Requires `teams:manage`. Setting `isActive` to false takes the member out of rotation while keeping their history and their place in the team — the join row has no soft delete.",
@@ -5546,7 +5936,9 @@
         }
       },
       "delete": {
-        "tags": ["Teams"],
+        "tags": [
+          "Teams"
+        ],
         "operationId": "teams.removeMember",
         "summary": "Remove a staff member from a team",
         "description": "Requires `teams:manage`.",
@@ -5657,7 +6049,9 @@
     },
     "/api/v1/staff": {
       "get": {
-        "tags": ["Staff"],
+        "tags": [
+          "Staff"
+        ],
         "operationId": "staff.list",
         "summary": "List staff profiles",
         "description": "Requires `staff:read`.",
@@ -5691,7 +6085,10 @@
           {
             "schema": {
               "type": "string",
-              "enum": ["true", "false"]
+              "enum": [
+                "true",
+                "false"
+              ]
             },
             "required": false,
             "name": "isActive",
@@ -5700,7 +6097,10 @@
           {
             "schema": {
               "type": "string",
-              "enum": ["true", "false"]
+              "enum": [
+                "true",
+                "false"
+              ]
             },
             "required": false,
             "name": "isBookable",
@@ -5784,7 +6184,9 @@
         }
       },
       "post": {
-        "tags": ["Staff"],
+        "tags": [
+          "Staff"
+        ],
         "operationId": "staff.create",
         "summary": "Create a staff profile",
         "description": "Requires `staff:manage`. The person is named only by `membershipId`: the membership proves they already belong to this workspace, and the user id is read off that row, so neither `businessId` nor `userId` is accepted.",
@@ -5894,7 +6296,9 @@
     },
     "/api/v1/staff/{id}": {
       "get": {
-        "tags": ["Staff"],
+        "tags": [
+          "Staff"
+        ],
         "operationId": "staff.get",
         "summary": "Read one staff profile",
         "description": "Requires `staff:read`.",
@@ -5991,7 +6395,9 @@
         }
       },
       "patch": {
-        "tags": ["Staff"],
+        "tags": [
+          "Staff"
+        ],
         "operationId": "staff.update",
         "summary": "Amend a staff profile",
         "description": "Requires `staff:manage`. `membershipId` cannot be changed: rebinding a profile to a different person would silently reassign their whole appointment history.",
@@ -6108,7 +6514,9 @@
         }
       },
       "delete": {
-        "tags": ["Staff"],
+        "tags": [
+          "Staff"
+        ],
         "operationId": "staff.remove",
         "summary": "Delete a staff profile",
         "description": "Requires `staff:manage`.",
@@ -6210,7 +6618,9 @@
     },
     "/api/v1/staff/{id}/services": {
       "get": {
-        "tags": ["Staff"],
+        "tags": [
+          "Staff"
+        ],
         "operationId": "staff.listServices",
         "summary": "List the services a staff member delivers",
         "description": "Requires `staff:read`.",
@@ -6307,7 +6717,9 @@
         }
       },
       "put": {
-        "tags": ["Staff"],
+        "tags": [
+          "Staff"
+        ],
         "operationId": "staff.replaceServices",
         "summary": "Replace the services a staff member delivers",
         "description": "Requires `staff:manage`. PUT, not PATCH: the body is the complete set, and anything absent from it is withdrawn. An empty array is a valid instruction meaning \"no services\".",
@@ -6426,7 +6838,9 @@
     },
     "/api/v1/services/categories": {
       "get": {
-        "tags": ["Services"],
+        "tags": [
+          "Services"
+        ],
         "operationId": "services.listCategories",
         "summary": "List service categories",
         "description": "Requires `services:read`.",
@@ -6460,7 +6874,10 @@
           {
             "schema": {
               "type": "string",
-              "enum": ["true", "false"]
+              "enum": [
+                "true",
+                "false"
+              ]
             },
             "required": false,
             "name": "isActive",
@@ -6544,7 +6961,9 @@
         }
       },
       "post": {
-        "tags": ["Services"],
+        "tags": [
+          "Services"
+        ],
         "operationId": "services.createCategory",
         "summary": "Create a service category",
         "description": "Requires `services:manage`.",
@@ -6654,7 +7073,9 @@
     },
     "/api/v1/services/categories/{id}": {
       "patch": {
-        "tags": ["Services"],
+        "tags": [
+          "Services"
+        ],
         "operationId": "services.updateCategory",
         "summary": "Amend a service category",
         "description": "Requires `services:manage`. At least one field must be present.",
@@ -6771,7 +7192,9 @@
         }
       },
       "delete": {
-        "tags": ["Services"],
+        "tags": [
+          "Services"
+        ],
         "operationId": "services.removeCategory",
         "summary": "Delete a service category",
         "description": "Requires `services:manage`.",
@@ -6873,7 +7296,9 @@
     },
     "/api/v1/services": {
       "get": {
-        "tags": ["Services"],
+        "tags": [
+          "Services"
+        ],
         "operationId": "services.list",
         "summary": "List services",
         "description": "Requires `services:read`.",
@@ -6907,7 +7332,10 @@
           {
             "schema": {
               "type": "string",
-              "enum": ["true", "false"]
+              "enum": [
+                "true",
+                "false"
+              ]
             },
             "required": false,
             "name": "isActive",
@@ -6916,7 +7344,10 @@
           {
             "schema": {
               "type": "string",
-              "enum": ["true", "false"]
+              "enum": [
+                "true",
+                "false"
+              ]
             },
             "required": false,
             "name": "isPublic",
@@ -7009,7 +7440,9 @@
         }
       },
       "post": {
-        "tags": ["Services"],
+        "tags": [
+          "Services"
+        ],
         "operationId": "services.create",
         "summary": "Create a service",
         "description": "Requires `services:manage`. `priceAmount` is in the smallest currency unit — 1250 for ₹12.50 — and a decimal is rejected rather than coerced. The nullable policy overrides (`preBufferMinutes`, `minNoticeMinutes`, `maxHorizonDays`, `slotIntervalMinutes`, `maxPerCustomerPerDay`) mean \"inherit the workspace setting\" when null and \"explicitly none\" when 0.",
@@ -7119,7 +7552,9 @@
     },
     "/api/v1/services/{id}": {
       "get": {
-        "tags": ["Services"],
+        "tags": [
+          "Services"
+        ],
         "operationId": "services.get",
         "summary": "Read one service",
         "description": "Requires `services:read`.",
@@ -7216,7 +7651,9 @@
         }
       },
       "patch": {
-        "tags": ["Services"],
+        "tags": [
+          "Services"
+        ],
         "operationId": "services.update",
         "summary": "Amend a service",
         "description": "Requires `services:manage`. At least one field must be present.",
@@ -7333,7 +7770,9 @@
         }
       },
       "delete": {
-        "tags": ["Services"],
+        "tags": [
+          "Services"
+        ],
         "operationId": "services.remove",
         "summary": "Delete a service",
         "description": "Requires `services:manage`.",
@@ -7435,7 +7874,9 @@
     },
     "/api/v1/services/{id}/staff": {
       "put": {
-        "tags": ["Services"],
+        "tags": [
+          "Services"
+        ],
         "operationId": "services.replaceStaff",
         "summary": "Replace the staff who deliver a service",
         "description": "Requires `services:manage`. PUT, not PATCH: the body is the complete set the caller wants to end up with. A repeated id is a 422 rather than a silent deduplication, because it would collide with the unique index on the join table.",
@@ -7554,7 +7995,9 @@
     },
     "/api/v1/services/{id}/locations": {
       "put": {
-        "tags": ["Services"],
+        "tags": [
+          "Services"
+        ],
         "operationId": "services.replaceLocations",
         "summary": "Replace the locations a service is offered at",
         "description": "Requires `services:manage`. An empty array is meaningful: no rows means the service is offered everywhere.",
@@ -7673,7 +8116,9 @@
     },
     "/api/v1/resources": {
       "get": {
-        "tags": ["Resources"],
+        "tags": [
+          "Resources"
+        ],
         "operationId": "resources.list",
         "summary": "List resources",
         "description": "Requires `resources:read`.",
@@ -7707,7 +8152,10 @@
           {
             "schema": {
               "type": "string",
-              "enum": ["true", "false"]
+              "enum": [
+                "true",
+                "false"
+              ]
             },
             "required": false,
             "name": "isActive",
@@ -7716,7 +8164,14 @@
           {
             "schema": {
               "type": "string",
-              "enum": ["ROOM", "EQUIPMENT", "VEHICLE", "DESK", "FACILITY", "OTHER"]
+              "enum": [
+                "ROOM",
+                "EQUIPMENT",
+                "VEHICLE",
+                "DESK",
+                "FACILITY",
+                "OTHER"
+              ]
             },
             "required": false,
             "name": "type",
@@ -7809,7 +8264,9 @@
         }
       },
       "post": {
-        "tags": ["Resources"],
+        "tags": [
+          "Resources"
+        ],
         "operationId": "resources.create",
         "summary": "Create a resource",
         "description": "Requires `resources:manage`. A null `locationId` means the resource is mobile and travels with the appointment; `capacity` is how many appointments may hold it at the same instant.",
@@ -7919,7 +8376,9 @@
     },
     "/api/v1/resources/{id}": {
       "get": {
-        "tags": ["Resources"],
+        "tags": [
+          "Resources"
+        ],
         "operationId": "resources.get",
         "summary": "Read one resource",
         "description": "Requires `resources:read`.",
@@ -8016,7 +8475,9 @@
         }
       },
       "patch": {
-        "tags": ["Resources"],
+        "tags": [
+          "Resources"
+        ],
         "operationId": "resources.update",
         "summary": "Amend a resource",
         "description": "Requires `resources:manage`. At least one field must be present.",
@@ -8133,7 +8594,9 @@
         }
       },
       "delete": {
-        "tags": ["Resources"],
+        "tags": [
+          "Resources"
+        ],
         "operationId": "resources.remove",
         "summary": "Delete a resource",
         "description": "Requires `resources:manage`.",
@@ -8235,7 +8698,9 @@
     },
     "/api/v1/resources/requirements/service/{serviceId}": {
       "get": {
-        "tags": ["Resources"],
+        "tags": [
+          "Resources"
+        ],
         "operationId": "resources.listRequirements",
         "summary": "List the resources a service requires",
         "description": "Requires `resources:read`. These live under /resources rather than /services because they are edited from the resource-planning screen: a manager who may not touch the catalogue can still say which room a service needs.",
@@ -8332,7 +8797,9 @@
         }
       },
       "put": {
-        "tags": ["Resources"],
+        "tags": [
+          "Resources"
+        ],
         "operationId": "resources.replaceRequirements",
         "summary": "Replace the resources a service requires",
         "description": "Requires `resources:manage`. Each row names exactly one of `resourceId` (this specific resource) or `resourceType` (any free resource of that type) — never both, never neither. An optional row is reserved when possible and skipped when not, so a nicety never blocks a booking.",
@@ -8451,7 +8918,9 @@
     },
     "/api/v1/customers": {
       "get": {
-        "tags": ["Customers"],
+        "tags": [
+          "Customers"
+        ],
         "operationId": "customers.list",
         "summary": "List customers",
         "description": "Requires `customers:read`. `search` matches first name, last name and email.",
@@ -8495,7 +8964,11 @@
           {
             "schema": {
               "type": "string",
-              "enum": ["ACTIVE", "BLOCKED", "ARCHIVED"]
+              "enum": [
+                "ACTIVE",
+                "BLOCKED",
+                "ARCHIVED"
+              ]
             },
             "required": false,
             "name": "status",
@@ -8589,7 +9062,9 @@
         }
       },
       "post": {
-        "tags": ["Customers"],
+        "tags": [
+          "Customers"
+        ],
         "operationId": "customers.create",
         "summary": "Create a customer",
         "description": "Requires `customers:manage`, and additionally `customers:notes:manage` when the body carries `notes` — that rule depends on the payload, so the service enforces it per request rather than the router. Booking counters are read-only and rejected if sent.",
@@ -8699,7 +9174,9 @@
     },
     "/api/v1/customers/{id}": {
       "get": {
-        "tags": ["Customers"],
+        "tags": [
+          "Customers"
+        ],
         "operationId": "customers.get",
         "summary": "Read one customer",
         "description": "Requires `customers:read`.",
@@ -8796,7 +9273,9 @@
         }
       },
       "patch": {
-        "tags": ["Customers"],
+        "tags": [
+          "Customers"
+        ],
         "operationId": "customers.update",
         "summary": "Amend a customer",
         "description": "Requires `customers:manage`, plus `customers:notes:manage` when the patch carries `notes`. `communicationPreferences` is merged over the stored object rather than replacing it, so omitted flags keep their value.",
@@ -8913,7 +9392,9 @@
         }
       },
       "delete": {
-        "tags": ["Customers"],
+        "tags": [
+          "Customers"
+        ],
         "operationId": "customers.remove",
         "summary": "Delete a customer",
         "description": "Requires `customers:manage`.",
@@ -9015,7 +9496,9 @@
     },
     "/api/v1/customers/{id}/appointments": {
       "get": {
-        "tags": ["Customers"],
+        "tags": [
+          "Customers"
+        ],
         "operationId": "customers.listAppointments",
         "summary": "List a customer's appointments",
         "description": "Requires `customers:read`.",
@@ -9135,7 +9618,9 @@
     },
     "/api/v1/availability/business-hours": {
       "get": {
-        "tags": ["Availability"],
+        "tags": [
+          "Availability"
+        ],
         "operationId": "availability.listBusinessHours",
         "summary": "List opening hours",
         "description": "Requires `availability:read`. Omitting `locationId` returns the business-wide set — the same set PUT replaces when its body carries no locationId, so one GET round-trips into one PUT.",
@@ -9178,7 +9663,10 @@
           {
             "schema": {
               "type": "string",
-              "enum": ["true", "false"]
+              "enum": [
+                "true",
+                "false"
+              ]
             },
             "required": false,
             "name": "isActive",
@@ -9262,7 +9750,9 @@
         }
       },
       "put": {
-        "tags": ["Availability"],
+        "tags": [
+          "Availability"
+        ],
         "operationId": "availability.replaceBusinessHours",
         "summary": "Replace opening hours",
         "description": "Requires `availability:manage`. PUT, not PATCH: the body is the complete week for the named scope, and an empty array means \"this scope has no opening hours at all\". Overlapping active windows are rejected with the offending index. Windows are authored as `HH:mm` wall-clock times and stored as minutes from local midnight. An end at or before the start is read as running into the next day, so 22:00–02:00 is a single overnight window. `24:00` is midnight at the *end* of a day and may only close one.",
@@ -9372,7 +9862,9 @@
     },
     "/api/v1/availability/staff/{staffProfileId}/rules": {
       "get": {
-        "tags": ["Availability"],
+        "tags": [
+          "Availability"
+        ],
         "operationId": "availability.listStaffRules",
         "summary": "List a staff member's weekly availability rules",
         "description": "Requires `availability:read`.",
@@ -9415,7 +9907,10 @@
           {
             "schema": {
               "type": "string",
-              "enum": ["true", "false"]
+              "enum": [
+                "true",
+                "false"
+              ]
             },
             "required": false,
             "name": "isActive",
@@ -9499,7 +9994,9 @@
         }
       },
       "put": {
-        "tags": ["Availability"],
+        "tags": [
+          "Availability"
+        ],
         "operationId": "availability.replaceStaffRules",
         "summary": "Replace a staff member's weekly availability rules",
         "description": "Requires `availability:manage` or `availability:manage:own`; the service then refuses anything that is not the caller's own row, because whose rota is being edited is a property of the request rather than of the route. Overlap detection is deliberately blind to `locationId`: one person cannot be at two sites at once. Windows are authored as `HH:mm` wall-clock times and stored as minutes from local midnight. An end at or before the start is read as running into the next day, so 22:00–02:00 is a single overnight window. `24:00` is midnight at the *end* of a day and may only close one.",
@@ -9618,7 +10115,9 @@
     },
     "/api/v1/availability/overrides": {
       "get": {
-        "tags": ["Availability"],
+        "tags": [
+          "Availability"
+        ],
         "operationId": "availability.listOverrides",
         "summary": "List availability overrides",
         "description": "Requires `availability:read`.",
@@ -9661,7 +10160,12 @@
           {
             "schema": {
               "type": "string",
-              "enum": ["BUSINESS", "LOCATION", "STAFF", "RESOURCE"]
+              "enum": [
+                "BUSINESS",
+                "LOCATION",
+                "STAFF",
+                "RESOURCE"
+              ]
             },
             "required": false,
             "name": "scope",
@@ -9761,7 +10265,9 @@
         }
       },
       "post": {
-        "tags": ["Availability"],
+        "tags": [
+          "Availability"
+        ],
         "operationId": "availability.createOverride",
         "summary": "Create an availability override",
         "description": "Requires `availability:manage` or `availability:manage:own`. `isAvailable: false` removes time the recurring rules offer; true adds a window. The scope decides which target ids are legal: BUSINESS names none, LOCATION names only a location, STAFF names a staff profile and may narrow to a location, RESOURCE likewise. Give both `startTime` and `endTime` for a partial day, or neither for a whole one.",
@@ -9871,7 +10377,9 @@
     },
     "/api/v1/availability/overrides/{id}": {
       "delete": {
-        "tags": ["Availability"],
+        "tags": [
+          "Availability"
+        ],
         "operationId": "availability.removeOverride",
         "summary": "Delete an availability override",
         "description": "Requires `availability:manage` or `availability:manage:own`.",
@@ -9973,7 +10481,9 @@
     },
     "/api/v1/availability/holidays": {
       "get": {
-        "tags": ["Availability"],
+        "tags": [
+          "Availability"
+        ],
         "operationId": "availability.listHolidays",
         "summary": "List holidays",
         "description": "Requires `availability:read`.",
@@ -10016,7 +10526,10 @@
           {
             "schema": {
               "type": "string",
-              "enum": ["true", "false"]
+              "enum": [
+                "true",
+                "false"
+              ]
             },
             "required": false,
             "name": "isActive",
@@ -10116,7 +10629,9 @@
         }
       },
       "post": {
-        "tags": ["Availability"],
+        "tags": [
+          "Availability"
+        ],
         "operationId": "availability.createHoliday",
         "summary": "Create a holiday",
         "description": "Requires `availability:manage`. A null `locationId` means every location observes it; `isRecurringAnnually` repeats it on the same month and day thereafter; `closesBusiness: false` labels the day for customers without removing any availability.",
@@ -10226,7 +10741,9 @@
     },
     "/api/v1/availability/holidays/{id}": {
       "delete": {
-        "tags": ["Availability"],
+        "tags": [
+          "Availability"
+        ],
         "operationId": "availability.removeHoliday",
         "summary": "Delete a holiday",
         "description": "Requires `availability:manage`.",
@@ -10328,7 +10845,9 @@
     },
     "/api/v1/availability/blackouts": {
       "get": {
-        "tags": ["Availability"],
+        "tags": [
+          "Availability"
+        ],
         "operationId": "availability.listBlackouts",
         "summary": "List blackout periods",
         "description": "Requires `availability:read`.",
@@ -10362,7 +10881,12 @@
           {
             "schema": {
               "type": "string",
-              "enum": ["BUSINESS", "LOCATION", "STAFF", "RESOURCE"]
+              "enum": [
+                "BUSINESS",
+                "LOCATION",
+                "STAFF",
+                "RESOURCE"
+              ]
             },
             "required": false,
             "name": "scope",
@@ -10491,7 +11015,9 @@
         }
       },
       "post": {
-        "tags": ["Availability"],
+        "tags": [
+          "Availability"
+        ],
         "operationId": "availability.createBlackout",
         "summary": "Create a blackout period",
         "description": "Requires `availability:manage`. Unlike an override, a blackout is bounded by two instants rather than a calendar day, so both must carry their offset. The same scope/target rule as overrides applies.",
@@ -10601,7 +11127,9 @@
     },
     "/api/v1/availability/blackouts/{id}": {
       "delete": {
-        "tags": ["Availability"],
+        "tags": [
+          "Availability"
+        ],
         "operationId": "availability.removeBlackout",
         "summary": "Delete a blackout period",
         "description": "Requires `availability:manage`.",
@@ -10703,7 +11231,9 @@
     },
     "/api/v1/booking-links": {
       "get": {
-        "tags": ["Booking Links"],
+        "tags": [
+          "Booking Links"
+        ],
         "operationId": "bookingLinks.list",
         "summary": "List booking links",
         "description": "Requires `booking-links:read`.",
@@ -10737,7 +11267,10 @@
           {
             "schema": {
               "type": "string",
-              "enum": ["true", "false"]
+              "enum": [
+                "true",
+                "false"
+              ]
             },
             "required": false,
             "name": "isActive",
@@ -10746,7 +11279,12 @@
           {
             "schema": {
               "type": "string",
-              "enum": ["SINGLE_SERVICE", "CATALOG", "TEAM", "STAFF"]
+              "enum": [
+                "SINGLE_SERVICE",
+                "CATALOG",
+                "TEAM",
+                "STAFF"
+              ]
             },
             "required": false,
             "name": "type",
@@ -10840,7 +11378,9 @@
         }
       },
       "post": {
-        "tags": ["Booking Links"],
+        "tags": [
+          "Booking Links"
+        ],
         "operationId": "bookingLinks.create",
         "summary": "Create a booking link",
         "description": "Requires `booking-links:manage`. The `type` decides which target the link must name: SINGLE_SERVICE names `serviceId`, TEAM names `teamId`, STAFF names `staffProfileId`, and CATALOG names none because its offering comes from `serviceIds`. Naming a target the type does not use is a 422, not a stored intention the public page will never act on. The slug *is* the public URL, so a supplied one is validated rather than rewritten.",
@@ -10950,7 +11490,9 @@
     },
     "/api/v1/booking-links/{id}": {
       "get": {
-        "tags": ["Booking Links"],
+        "tags": [
+          "Booking Links"
+        ],
         "operationId": "bookingLinks.get",
         "summary": "Read one booking link",
         "description": "Requires `booking-links:read`.",
@@ -11047,7 +11589,9 @@
         }
       },
       "patch": {
-        "tags": ["Booking Links"],
+        "tags": [
+          "Booking Links"
+        ],
         "operationId": "bookingLinks.update",
         "summary": "Amend a booking link",
         "description": "Requires `booking-links:manage`. Only contradictions *within* the patch are caught here; whether the merged row still satisfies the type/target rule depends on the stored target, so the service re-checks the result before writing.",
@@ -11164,7 +11708,9 @@
         }
       },
       "delete": {
-        "tags": ["Booking Links"],
+        "tags": [
+          "Booking Links"
+        ],
         "operationId": "bookingLinks.remove",
         "summary": "Delete a booking link",
         "description": "Requires `booking-links:manage`.",
@@ -11266,7 +11812,9 @@
     },
     "/api/v1/booking-links/{id}/services": {
       "put": {
-        "tags": ["Booking Links"],
+        "tags": [
+          "Booking Links"
+        ],
         "operationId": "bookingLinks.replaceServices",
         "summary": "Replace the services a booking link offers",
         "description": "Requires `booking-links:manage`. PUT, not PATCH: the body is the complete set, and the array order is the order the public page lists them in.",
@@ -11385,7 +11933,9 @@
     },
     "/api/v1/appointments": {
       "get": {
-        "tags": ["Appointments"],
+        "tags": [
+          "Appointments"
+        ],
         "operationId": "appointments.list",
         "summary": "List appointments",
         "description": "Requires `appointments:read` or `appointments:read:own`. The router admits both and the query layer narrows to the caller's own diary, answering 404 — never 403 — for anything outside it. `from`/`to` bound a window rather than a start time: an appointment that began before the window and is still running belongs in it.",
@@ -11598,7 +12148,9 @@
         }
       },
       "post": {
-        "tags": ["Appointments"],
+        "tags": [
+          "Appointments"
+        ],
         "operationId": "appointments.create",
         "summary": "Book an appointment",
         "description": "Requires `appointments:create`. `staffProfileId` is required here, unlike on the public surface: staff-side booking is deliberate assignment, not Smart Match, and the slot search has already named the provider. `internalNotes` is deliberately not accepted — the private operator note is governed by `appointments:notes:manage` and is written through PATCH /{id}. Send X-Idempotency-Key to make a retry safe.",
@@ -11711,7 +12263,9 @@
     },
     "/api/v1/appointments/calendar": {
       "get": {
-        "tags": ["Appointments"],
+        "tags": [
+          "Appointments"
+        ],
         "operationId": "appointments.calendar",
         "summary": "Read the diary as calendar events",
         "description": "Requires `appointments:read` or `appointments:read:own`. `from` and `to` are required here, unlike on the list: a calendar view always has a visible window, so demanding one costs the client nothing and stops a bare request from scanning a workspace's entire history. The window may span at most 92 days.",
@@ -11905,7 +12459,9 @@
     },
     "/api/v1/appointments/availability/slots": {
       "get": {
-        "tags": ["Appointments"],
+        "tags": [
+          "Appointments"
+        ],
         "operationId": "appointments.slots",
         "summary": "Search bookable slots",
         "description": "Requires `availability:read` rather than a diary permission: reading what *could* be booked is an availability question. `timezone` is the zone the requested calendar days are read in, and `explain=true` returns the Smart Match scores behind each provider choice. The result names the provider for each offered time, which is what POST /api/v1/appointments then requires.",
@@ -11969,7 +12525,10 @@
           {
             "schema": {
               "type": "string",
-              "enum": ["true", "false"]
+              "enum": [
+                "true",
+                "false"
+              ]
             },
             "required": false,
             "name": "explain",
@@ -12055,7 +12614,9 @@
     },
     "/api/v1/appointments/{id}": {
       "get": {
-        "tags": ["Appointments"],
+        "tags": [
+          "Appointments"
+        ],
         "operationId": "appointments.get",
         "summary": "Read one appointment",
         "description": "Requires `appointments:read` or `appointments:read:own`.",
@@ -12152,7 +12713,9 @@
         }
       },
       "patch": {
-        "tags": ["Appointments"],
+        "tags": [
+          "Appointments"
+        ],
         "operationId": "appointments.update",
         "summary": "Amend an appointment's notes and title",
         "description": "Requires `appointments:update` or `appointments:notes:manage`; which one a given request needs depends on the fields it carries, so the router admits either and the service enforces per field. Times and status are absent by design: moving an appointment must go through POST /{id}/reschedule, which re-verifies the slot and moves the underlying reservations, and status must go through the lifecycle routes, which enforce the state machine.",
@@ -12271,7 +12834,9 @@
     },
     "/api/v1/appointments/{id}/reschedule": {
       "post": {
-        "tags": ["Appointments"],
+        "tags": [
+          "Appointments"
+        ],
         "operationId": "appointments.reschedule",
         "summary": "Move an appointment",
         "description": "Requires `appointments:reschedule`. Omitting `staffProfileId` keeps the current provider; the lifecycle re-verifies the slot and moves the staff and resource reservations either way. A lost race answers 409 SLOT_UNAVAILABLE.",
@@ -12390,7 +12955,9 @@
     },
     "/api/v1/appointments/{id}/cancel": {
       "post": {
-        "tags": ["Appointments"],
+        "tags": [
+          "Appointments"
+        ],
         "operationId": "appointments.cancel",
         "summary": "Cancel an appointment",
         "description": "Requires `appointments:cancel`. The optional reason is copied into the status history and into the customer's email.",
@@ -12509,7 +13076,9 @@
     },
     "/api/v1/appointments/{id}/approve": {
       "post": {
-        "tags": ["Appointments"],
+        "tags": [
+          "Appointments"
+        ],
         "operationId": "appointments.approve",
         "summary": "Approve a pending appointment",
         "description": "Requires `appointments:approve`. The body is empty and still validated strictly, so a client that thinks it is sending something is told that it is not.",
@@ -12628,7 +13197,9 @@
     },
     "/api/v1/appointments/{id}/reject": {
       "post": {
-        "tags": ["Appointments"],
+        "tags": [
+          "Appointments"
+        ],
         "operationId": "appointments.reject",
         "summary": "Reject a pending appointment",
         "description": "Requires `appointments:approve` — rejecting is the other half of approving, so a member who may admit a pending booking may also turn it away.",
@@ -12747,7 +13318,9 @@
     },
     "/api/v1/appointments/{id}/check-in": {
       "post": {
-        "tags": ["Appointments"],
+        "tags": [
+          "Appointments"
+        ],
         "operationId": "appointments.checkIn",
         "summary": "Check a customer in",
         "description": "Requires `appointments:complete`: check-in is the first step of seeing an appointment through, and that is the permission the STAFF role holds for the appointments it runs.",
@@ -12866,7 +13439,9 @@
     },
     "/api/v1/appointments/{id}/complete": {
       "post": {
-        "tags": ["Appointments"],
+        "tags": [
+          "Appointments"
+        ],
         "operationId": "appointments.complete",
         "summary": "Complete an appointment",
         "description": "Requires `appointments:complete`.",
@@ -12985,7 +13560,9 @@
     },
     "/api/v1/appointments/{id}/no-show": {
       "post": {
-        "tags": ["Appointments"],
+        "tags": [
+          "Appointments"
+        ],
         "operationId": "appointments.noShow",
         "summary": "Mark an appointment as a no-show",
         "description": "Requires `appointments:no-show`.",
@@ -13104,7 +13681,9 @@
     },
     "/api/v1/waitlist": {
       "get": {
-        "tags": ["Waitlist"],
+        "tags": [
+          "Waitlist"
+        ],
         "operationId": "waitlist.list",
         "summary": "List waitlist entries",
         "description": "Requires `waitlist:read`.",
@@ -13138,7 +13717,13 @@
           {
             "schema": {
               "type": "string",
-              "enum": ["ACTIVE", "NOTIFIED", "CONVERTED", "EXPIRED", "CANCELLED"]
+              "enum": [
+                "ACTIVE",
+                "NOTIFIED",
+                "CONVERTED",
+                "EXPIRED",
+                "CANCELLED"
+              ]
             },
             "required": false,
             "name": "status",
@@ -13231,7 +13816,9 @@
         }
       },
       "post": {
-        "tags": ["Waitlist"],
+        "tags": [
+          "Waitlist"
+        ],
         "operationId": "waitlist.create",
         "summary": "Add a customer to the waitlist",
         "description": "Requires `waitlist:manage`. The desired window is a pair of local dates plus a daily minute range, read in `timezone` — which defaults to the customer's own zone when omitted. `status`, hold fields and `publicId` are owned by the matcher and the lifecycle, so sending any of them is a 422 rather than a way to hand yourself a hold.",
@@ -13341,7 +13928,9 @@
     },
     "/api/v1/waitlist/{id}": {
       "get": {
-        "tags": ["Waitlist"],
+        "tags": [
+          "Waitlist"
+        ],
         "operationId": "waitlist.get",
         "summary": "Read one waitlist entry",
         "description": "Requires `waitlist:read`.",
@@ -13438,7 +14027,9 @@
         }
       },
       "patch": {
-        "tags": ["Waitlist"],
+        "tags": [
+          "Waitlist"
+        ],
         "operationId": "waitlist.update",
         "summary": "Amend a waitlist entry",
         "description": "Requires `waitlist:manage`. `customerId` and `serviceId` cannot be changed: either would turn this into a different request, which the partial unique index makes a collision rather than an edit. Moving a person to another service is a new entry.",
@@ -13555,7 +14146,9 @@
         }
       },
       "delete": {
-        "tags": ["Waitlist"],
+        "tags": [
+          "Waitlist"
+        ],
         "operationId": "waitlist.remove",
         "summary": "Delete a waitlist entry",
         "description": "Requires `waitlist:manage`.",
@@ -13657,7 +14250,9 @@
     },
     "/api/v1/waitlist/{id}/notify": {
       "post": {
-        "tags": ["Waitlist"],
+        "tags": [
+          "Waitlist"
+        ],
         "operationId": "waitlist.notify",
         "summary": "Re-offer a slot to a waitlisted customer",
         "description": "Requires `waitlist:manage`. The body is empty and validated strictly.",
@@ -13776,7 +14371,9 @@
     },
     "/api/v1/waitlist/{id}/convert": {
       "post": {
-        "tags": ["Waitlist"],
+        "tags": [
+          "Waitlist"
+        ],
         "operationId": "waitlist.convert",
         "summary": "Convert a waitlist entry into a booking",
         "description": "Requires `waitlist:manage`, which the permission catalogue defines as managing *and converting* entries. Only the instant is accepted: the service, the customer and any staff or location preference are read from the entry, so a conversion cannot quietly book something other than what the customer asked for. Answers 201 because the meaningful outcome is a new appointment.",
@@ -13895,7 +14492,9 @@
     },
     "/api/v1/analytics/overview": {
       "get": {
-        "tags": ["Analytics"],
+        "tags": [
+          "Analytics"
+        ],
         "operationId": "analytics.overview",
         "summary": "Headline figures for a period",
         "description": "The window is a pair of inclusive calendar dates, not instants: \"1 March\" means 1 March where the business is, resolved against the workspace timezone inside PostgreSQL. Both `from` and `to` are required — an analytics view always has a visible period, and demanding one stops a bare request from aggregating a workspace's entire history. Neither `locationId` nor `staffProfileId` is a tenant selector: both narrow a query already filtered by the caller's proven workspace, so a foreign id reports zeros. Requires `analytics:read`.",
@@ -14019,7 +14618,9 @@
     },
     "/api/v1/analytics/trends": {
       "get": {
-        "tags": ["Analytics"],
+        "tags": [
+          "Analytics"
+        ],
         "operationId": "analytics.trends",
         "summary": "Booking volume over time",
         "description": "The window is a pair of inclusive calendar dates, not instants: \"1 March\" means 1 March where the business is, resolved against the workspace timezone inside PostgreSQL. Both `from` and `to` are required — an analytics view always has a visible period, and demanding one stops a bare request from aggregating a workspace's entire history. Neither `locationId` nor `staffProfileId` is a tenant selector: both narrow a query already filtered by the caller's proven workspace, so a foreign id reports zeros. Requires `analytics:read`.",
@@ -14143,7 +14744,9 @@
     },
     "/api/v1/analytics/staff": {
       "get": {
-        "tags": ["Analytics"],
+        "tags": [
+          "Analytics"
+        ],
         "operationId": "analytics.staff",
         "summary": "Breakdown by staff member",
         "description": "The window is a pair of inclusive calendar dates, not instants: \"1 March\" means 1 March where the business is, resolved against the workspace timezone inside PostgreSQL. Both `from` and `to` are required — an analytics view always has a visible period, and demanding one stops a bare request from aggregating a workspace's entire history. Neither `locationId` nor `staffProfileId` is a tenant selector: both narrow a query already filtered by the caller's proven workspace, so a foreign id reports zeros. Requires `analytics:read`.",
@@ -14267,7 +14870,9 @@
     },
     "/api/v1/analytics/services": {
       "get": {
-        "tags": ["Analytics"],
+        "tags": [
+          "Analytics"
+        ],
         "operationId": "analytics.services",
         "summary": "Breakdown by service",
         "description": "The window is a pair of inclusive calendar dates, not instants: \"1 March\" means 1 March where the business is, resolved against the workspace timezone inside PostgreSQL. Both `from` and `to` are required — an analytics view always has a visible period, and demanding one stops a bare request from aggregating a workspace's entire history. Neither `locationId` nor `staffProfileId` is a tenant selector: both narrow a query already filtered by the caller's proven workspace, so a foreign id reports zeros. Requires `analytics:read`.",
@@ -14391,7 +14996,9 @@
     },
     "/api/v1/analytics/locations": {
       "get": {
-        "tags": ["Analytics"],
+        "tags": [
+          "Analytics"
+        ],
         "operationId": "analytics.locations",
         "summary": "Breakdown by location",
         "description": "The window is a pair of inclusive calendar dates, not instants: \"1 March\" means 1 March where the business is, resolved against the workspace timezone inside PostgreSQL. Both `from` and `to` are required — an analytics view always has a visible period, and demanding one stops a bare request from aggregating a workspace's entire history. Neither `locationId` nor `staffProfileId` is a tenant selector: both narrow a query already filtered by the caller's proven workspace, so a foreign id reports zeros. Requires `analytics:read`.",
@@ -14515,7 +15122,9 @@
     },
     "/api/v1/analytics/peak-times": {
       "get": {
-        "tags": ["Analytics"],
+        "tags": [
+          "Analytics"
+        ],
         "operationId": "analytics.peakTimes",
         "summary": "Demand by day and hour",
         "description": "The window is a pair of inclusive calendar dates, not instants: \"1 March\" means 1 March where the business is, resolved against the workspace timezone inside PostgreSQL. Both `from` and `to` are required — an analytics view always has a visible period, and demanding one stops a bare request from aggregating a workspace's entire history. Neither `locationId` nor `staffProfileId` is a tenant selector: both narrow a query already filtered by the caller's proven workspace, so a foreign id reports zeros. Requires `analytics:read`.",
@@ -14639,7 +15248,9 @@
     },
     "/api/v1/analytics/customers": {
       "get": {
-        "tags": ["Analytics"],
+        "tags": [
+          "Analytics"
+        ],
         "operationId": "analytics.customers",
         "summary": "Customer acquisition and retention",
         "description": "The window is a pair of inclusive calendar dates, not instants: \"1 March\" means 1 March where the business is, resolved against the workspace timezone inside PostgreSQL. Both `from` and `to` are required — an analytics view always has a visible period, and demanding one stops a bare request from aggregating a workspace's entire history. Neither `locationId` nor `staffProfileId` is a tenant selector: both narrow a query already filtered by the caller's proven workspace, so a foreign id reports zeros. Requires `analytics:read`.",
@@ -14763,7 +15374,9 @@
     },
     "/api/v1/reports/appointments": {
       "get": {
-        "tags": ["Reports"],
+        "tags": [
+          "Reports"
+        ],
         "operationId": "reports.appointments",
         "summary": "List appointments as a report",
         "description": "Requires `reports:read`. `from`/`to` are optional here, unlike on the analytics surface — a report is a record-keeping tool, and \"every appointment this branch has ever had\" is a legitimate question. When both are supplied the same 366-day cap applies, so a range filter cannot be used to force an unindexed scan.",
@@ -14957,7 +15570,9 @@
     },
     "/api/v1/reports/appointments.csv": {
       "get": {
-        "tags": ["Reports"],
+        "tags": [
+          "Reports"
+        ],
         "operationId": "reports.exportAppointments",
         "summary": "Export the appointment report as CSV",
         "description": "Requires `reports:read` **and** `reports:export`: an export is a read that leaves the building, so it needs the permission to read and the separate permission to take a copy. Takes the same filters as the JSON report so the file always reproduces the table an operator was looking at, but no pagination — it is bounded by a hard row cap instead, because a page number would only produce a truncated file that looks complete. The response carries `X-Report-Row-Limit`, `X-Report-Matched-Rows` and `X-Report-Truncated` headers, and a Content-Disposition that makes a browser save it.",
@@ -15129,9 +15744,1208 @@
         }
       }
     },
+    "/api/v1/admin/overview": {
+      "get": {
+        "tags": [
+          "Platform Admin"
+        ],
+        "operationId": "adminOverview",
+        "summary": "Platform-wide headline figures",
+        "description": "Requires platform administrator access. Counts workspaces, accounts, appointments and customers across every tenant. Volume is cut on when a booking was taken rather than on when it falls due, so the fourteen-day series answers \"how much work came in\" rather than \"how full is the diary\"; only the upcoming counter reads the appointment start. The customer figure is a total and nothing else — no part of this payload identifies a person a workspace books.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`data` carries the workspace, user, appointment and customer counters, a `bookingsByDay` series of exactly 14 UTC days ending today and zero-filled, and the five workspaces with the most bookings taken in the last 30 days.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/workspaces": {
+      "get": {
+        "tags": [
+          "Platform Admin"
+        ],
+        "operationId": "adminListWorkspaces",
+        "summary": "List every workspace on the platform",
+        "description": "Requires platform administrator access. The one directory in the product that spans tenants, which is why each row carries counts and the owning account rather than any of the workspace's own records. `search` matches name or slug case-insensitively with LIKE wildcards escaped, so a search for `%` looks for a literal per cent sign instead of matching everything.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            },
+            "required": false,
+            "name": "page",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            },
+            "required": false,
+            "name": "pageSize",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": false,
+            "name": "search",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "ACTIVE",
+                "SUSPENDED",
+                "ARCHIVED"
+              ]
+            },
+            "required": false,
+            "name": "status",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "newest",
+                "oldest",
+                "name",
+                "appointments"
+              ],
+              "default": "newest"
+            },
+            "required": false,
+            "name": "sort",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`data` is one page of workspace summaries, each with its member, staff, service, location, appointment and customer counts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/workspaces/{id}": {
+      "get": {
+        "tags": [
+          "Platform Admin"
+        ],
+        "operationId": "adminGetWorkspace",
+        "summary": "Read one workspace",
+        "description": "Requires platform administrator access. Adds the profile fields, the member list, a breakdown of appointments by status and the twenty most recent audit entries for this workspace. Members are platform accounts, not customers: an operator can see who administers a clinic and never who it treats. A soft-deleted workspace answers 404 like any unknown id — it is no longer administrable, and must be indistinguishable from one that never existed.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`data` is the workspace summary plus `members`, `appointmentsByStatus` and `recentActivity`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/workspaces/{id}/status": {
+      "patch": {
+        "tags": [
+          "Platform Admin"
+        ],
+        "operationId": "adminUpdateWorkspaceStatus",
+        "summary": "Suspend, archive or restore a workspace",
+        "description": "Requires platform administrator access. Suspending a workspace closes it from both directions at once: tenant resolution only accepts an ACTIVE business, so every management call its members make begins answering 404, and its public booking pages stop serving. Nothing is deleted and no appointment is cancelled — setting the workspace back to ACTIVE returns it exactly as it was. The optional `reason` is stored only on the audit row, written in the same transaction as the change, because \"why was this suspended\" is a question that arrives weeks later.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateWorkspaceStatusRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the workspace detail, re-read after the change committed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with stored state: a duplicate, a booking race lost at the database exclusion constraint, or a status transition the lifecycle forbids.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/users": {
+      "get": {
+        "tags": [
+          "Platform Admin"
+        ],
+        "operationId": "adminListUsers",
+        "summary": "List platform accounts",
+        "description": "Requires platform administrator access. These are the people who sign in, not the customers a workspace books — the two never meet on this surface. `search` matches email, first name or last name case-insensitively. `workspaceCount` ignores memberships in soft-deleted workspaces, so it always equals the length of the membership list the detail endpoint returns.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            },
+            "required": false,
+            "name": "page",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            },
+            "required": false,
+            "name": "pageSize",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": false,
+            "name": "search",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "ACTIVE",
+                "INVITED",
+                "SUSPENDED",
+                "DEACTIVATED"
+              ]
+            },
+            "required": false,
+            "name": "status",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "ADMIN",
+                "USER"
+              ]
+            },
+            "required": false,
+            "name": "platformRole",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "newest",
+                "oldest",
+                "name",
+                "lastLogin"
+              ],
+              "default": "newest"
+            },
+            "required": false,
+            "name": "sort",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`data` is one page of account summaries with their workspace counts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/users/{id}": {
+      "get": {
+        "tags": [
+          "Platform Admin"
+        ],
+        "operationId": "adminGetUser",
+        "summary": "Read one platform account",
+        "description": "Requires platform administrator access. Adds contact and locale settings, lockout state, the number of refresh-token sessions still live, and every workspace the account belongs to with the role it holds there. `activeSessionCount` is the honest answer to \"is this person still signed in somewhere\", which is what an operator needs both before suspending an account and immediately afterwards.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`data` is the account summary plus its session state and `memberships`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/users/{id}/status": {
+      "patch": {
+        "tags": [
+          "Platform Admin"
+        ],
+        "operationId": "adminUpdateUserStatus",
+        "summary": "Suspend, deactivate or reinstate an account",
+        "description": "Requires platform administrator access. Suspending or deactivating an account revokes every live refresh token in the same transaction as the status change, so a session cannot outlive the decision; authentication refuses a SUSPENDED or DEACTIVATED user on every request, so the access token already in their hands dies at its next call too. Reinstating revokes nothing — the person simply signs in again. Changing your own status is refused with 409: an operator who suspends themselves has closed the only surface that could let them back in. INVITED is not accepted, because it is a state the invitation flow owns and setting it by hand would strand the account.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateUserStatusRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the account detail, re-read after the change committed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with stored state: a duplicate, a booking race lost at the database exclusion constraint, or a status transition the lifecycle forbids.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/users/{id}/platform-role": {
+      "patch": {
+        "tags": [
+          "Platform Admin"
+        ],
+        "operationId": "adminUpdatePlatformRole",
+        "summary": "Grant or withdraw platform administrator access",
+        "description": "Requires platform administrator access. ADMIN is not a workspace role: it grants this entire surface and nothing at all inside any tenant. Two demotions are refused with 409 — your own, and one that would leave the platform with no ACTIVE administrator. The second is decided under a row lock, so two operators demoting each other at the same moment cannot both read \"there is still another admin\" and both succeed.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdatePlatformRoleRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the account detail, re-read after the change committed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with stored state: a duplicate, a booking race lost at the database exclusion constraint, or a status transition the lifecycle forbids.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/audit-logs": {
+      "get": {
+        "tags": [
+          "Platform Admin"
+        ],
+        "operationId": "adminListAuditLogs",
+        "summary": "Search the audit trail across tenants",
+        "description": "Requires platform administrator access. The same rows a workspace sees in its own activity feed, plus the platform-level ones that belong to no tenant and carry a null `businessId`. `from` and `to` are inclusive calendar dates compared against the moment the row was written, and rows come back newest first. `businessId` narrows the search here rather than asserting a tenant — the distinction that makes this surface possible at all.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            },
+            "required": false,
+            "name": "page",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            },
+            "required": false,
+            "name": "pageSize",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "businessId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": false,
+            "name": "action",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "actorUserId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": false,
+            "name": "entityType",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "from",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "to",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`data` is one page of audit entries, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/health": {
+      "get": {
+        "tags": [
+          "Platform Admin"
+        ],
+        "operationId": "adminSystemHealth",
+        "summary": "Dependency and delivery-backlog status",
+        "description": "Requires platform administrator access. Distinct from the unauthenticated /health and /ready probes, which answer \"is this process alive\" for an orchestrator: this one reports on PostgreSQL, Redis and the notification outbox, which is operator information rather than something to expose at the edge. It answers 200 even when a dependency is down — a 503 would make the one page that could explain an outage disappear during one — so read `database.ok`, `redis.ok` and the outbox counters rather than the status code.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`data` carries the database and Redis checks, the outbox backlog including `dueNow` and the age of the oldest pending message, and the API build metadata.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/public/booking-links/{slug}": {
       "get": {
-        "tags": ["Public Booking"],
+        "tags": [
+          "Public Booking"
+        ],
         "operationId": "public.showBookingLink",
         "summary": "Read a public booking page",
         "description": "The workspace is derived from the slug — no tenant identifier is accepted anywhere on this surface. Returns only what the link publishes: its branding, its custom questions and the offering it actually exposes.",
@@ -15204,7 +17018,9 @@
     },
     "/api/v1/public/booking-links/{slug}/availability": {
       "get": {
-        "tags": ["Public Booking"],
+        "tags": [
+          "Public Booking"
+        ],
         "operationId": "public.showAvailability",
         "summary": "Search bookable slots on a public booking page",
         "description": "Rate limited more tightly than the rest of the surface: a wide date range fans out into a slot search per provider. `timezone` is the customer's own zone and bounds the search to their calendar days, so \"next Tuesday\" means their Tuesday and not the workspace's. `staffProfileId` is honoured only when the link lets customers choose their provider.",
@@ -15328,7 +17144,9 @@
     },
     "/api/v1/public/booking-links/{slug}/bookings": {
       "post": {
-        "tags": ["Public Booking"],
+        "tags": [
+          "Public Booking"
+        ],
         "operationId": "public.createBooking",
         "summary": "Book through a public booking page",
         "description": "No customer identifier is accepted: a caller who could name an existing customer row could attach their booking — and the confirmation email — to somebody else's record, so the service matches on the submitted email inside the tenant instead. Omitting `staffProfileId` lets Smart Match assign a provider. `answers` is checked against the questions this link publishes and anything it did not ask for is dropped. Send X-Idempotency-Key to make a retry safe.",
@@ -15434,7 +17252,9 @@
     },
     "/api/v1/public/appointments/{publicId}": {
       "get": {
-        "tags": ["Public Booking"],
+        "tags": [
+          "Public Booking"
+        ],
         "operationId": "public.showAppointment",
         "summary": "Read one booking by its public reference",
         "description": "Addressed by the opaque `apt_…` handle, never by an internal UUID. That handle behaves like a bearer token, which is why this route never widens: it reads exactly the one appointment named in the path.",
@@ -15505,7 +17325,9 @@
     },
     "/api/v1/public/appointments/{publicId}/reschedule": {
       "post": {
-        "tags": ["Public Booking"],
+        "tags": [
+          "Public Booking"
+        ],
         "operationId": "public.rescheduleAppointment",
         "summary": "Move a booking from its manage link",
         "description": "The customer moves the time and nothing else. Provider and location are deliberately not accepted: the appointment already names them, and letting an unauthenticated caller reassign it would turn the manage link into a way to book any provider in the workspace, outside the offering its booking link publishes. Subject to the workspace's reschedule deadline and its per-appointment limit.",
@@ -15596,7 +17418,9 @@
     },
     "/api/v1/public/appointments/{publicId}/cancel": {
       "post": {
-        "tags": ["Public Booking"],
+        "tags": [
+          "Public Booking"
+        ],
         "operationId": "public.cancelAppointment",
         "summary": "Cancel a booking from its manage link",
         "description": "Subject to the workspace's cancellation deadline and to `allowCustomerCancel`. The optional reason reaches the status history and the operator's notification.",

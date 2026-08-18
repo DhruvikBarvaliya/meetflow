@@ -140,6 +140,16 @@ import {
   appointmentReportQuerySchema,
 } from '../modules/analytics/reports.validation';
 import {
+  listAuditLogsQuerySchema,
+  listUsersQuerySchema,
+  listWorkspacesQuerySchema,
+  updatePlatformRoleSchema,
+  updateUserStatusSchema,
+  updateWorkspaceStatusSchema,
+  userIdParamsSchema,
+  workspaceIdParamsSchema,
+} from '../modules/admin/admin.validation';
+import {
   appointmentPublicIdParamsSchema,
   bookingLinkSlugParamsSchema,
   cancelPublicAppointmentSchema,
@@ -179,6 +189,7 @@ const TAGS = {
   waitlist: 'Waitlist',
   analytics: 'Analytics',
   reports: 'Reports',
+  admin: 'Platform Admin',
   publicBooking: 'Public Booking',
 } as const;
 
@@ -231,6 +242,16 @@ const TAG_DESCRIPTIONS: Array<{ name: string; description: string }> = [
   {
     name: TAGS.reports,
     description: 'The same rows listed rather than aggregated, plus CSV export.',
+  },
+  {
+    name: TAGS.admin,
+    description:
+      'Operating the platform itself, and the only endpoints that read across tenants. They ' +
+      'require `platformRole = ADMIN` and are not tenant-scoped — X-Business-Id plays no part ' +
+      'here, because an operator holds no membership in the workspaces they administer. What ' +
+      'they expose is workspaces, platform accounts and counts; never customer names, contact ' +
+      'details, appointment contents or notes. Running the platform is no reason to read a ' +
+      "clinic's patient list, and the shape of these responses is what enforces that.",
   },
   {
     name: TAGS.publicBooking,
@@ -2462,6 +2483,235 @@ operation({
 });
 
 // ---------------------------------------------------------------------------
+// Platform admin — /api/v1/admin, operators only
+//
+// Every operation below spells out `authenticated: true` and `tenant: false`
+// even though both match the defaults. This is the one authenticated surface in
+// the product that is not tenant-scoped, and saying so on each operation beats
+// leaving a reader to infer it from an absent header.
+// ---------------------------------------------------------------------------
+
+const updateWorkspaceStatusRequest = component(
+  'UpdateWorkspaceStatusRequest',
+  updateWorkspaceStatusSchema,
+);
+const updateUserStatusRequest = component('UpdateUserStatusRequest', updateUserStatusSchema);
+const updatePlatformRoleRequest = component('UpdatePlatformRoleRequest', updatePlatformRoleSchema);
+
+operation({
+  method: 'get',
+  path: '/api/v1/admin/overview',
+  tag: TAGS.admin,
+  operationId: 'adminOverview',
+  summary: 'Platform-wide headline figures',
+  description:
+    'Requires platform administrator access. Counts workspaces, accounts, appointments and ' +
+    'customers across every tenant. Volume is cut on when a booking was taken rather than on ' +
+    'when it falls due, so the fourteen-day series answers "how much work came in" rather than ' +
+    '"how full is the diary"; only the upcoming counter reads the appointment start. The ' +
+    'customer figure is a total and nothing else — no part of this payload identifies a person ' +
+    'a workspace books.',
+  authenticated: true,
+  tenant: false,
+  responses: ok(
+    '`data` carries the workspace, user, appointment and customer counters, a `bookingsByDay` ' +
+      'series of exactly 14 UTC days ending today and zero-filled, and the five workspaces ' +
+      'with the most bookings taken in the last 30 days.',
+  ),
+  errors: MANAGEMENT_ERRORS,
+});
+
+operation({
+  method: 'get',
+  path: '/api/v1/admin/workspaces',
+  tag: TAGS.admin,
+  operationId: 'adminListWorkspaces',
+  summary: 'List every workspace on the platform',
+  description:
+    'Requires platform administrator access. The one directory in the product that spans ' +
+    'tenants, which is why each row carries counts and the owning account rather than any of ' +
+    "the workspace's own records. `search` matches name or slug case-insensitively with LIKE " +
+    'wildcards escaped, so a search for `%` looks for a literal per cent sign instead of ' +
+    'matching everything.',
+  authenticated: true,
+  tenant: false,
+  query: listWorkspacesQuerySchema,
+  responses: page(
+    '`data` is one page of workspace summaries, each with its member, staff, service, ' +
+      'location, appointment and customer counts.',
+  ),
+  errors: MANAGEMENT_ERRORS,
+});
+
+operation({
+  method: 'get',
+  path: '/api/v1/admin/workspaces/{id}',
+  tag: TAGS.admin,
+  operationId: 'adminGetWorkspace',
+  summary: 'Read one workspace',
+  description:
+    'Requires platform administrator access. Adds the profile fields, the member list, a ' +
+    'breakdown of appointments by status and the twenty most recent audit entries for this ' +
+    'workspace. Members are platform accounts, not customers: an operator can see who ' +
+    'administers a clinic and never who it treats. A soft-deleted workspace answers 404 like ' +
+    'any unknown id — it is no longer administrable, and must be indistinguishable from one ' +
+    'that never existed.',
+  authenticated: true,
+  tenant: false,
+  params: workspaceIdParamsSchema,
+  responses: ok(
+    '`data` is the workspace summary plus `members`, `appointmentsByStatus` and ' +
+      '`recentActivity`.',
+  ),
+  errors: MANAGEMENT_ERRORS,
+});
+
+operation({
+  method: 'patch',
+  path: '/api/v1/admin/workspaces/{id}/status',
+  tag: TAGS.admin,
+  operationId: 'adminUpdateWorkspaceStatus',
+  summary: 'Suspend, archive or restore a workspace',
+  description:
+    'Requires platform administrator access. Suspending a workspace closes it from both ' +
+    'directions at once: tenant resolution only accepts an ACTIVE business, so every ' +
+    'management call its members make begins answering 404, and its public booking pages stop ' +
+    'serving. Nothing is deleted and no appointment is cancelled — setting the workspace back ' +
+    'to ACTIVE returns it exactly as it was. The optional `reason` is stored only on the audit ' +
+    'row, written in the same transaction as the change, because "why was this suspended" is a ' +
+    'question that arrives weeks later.',
+  authenticated: true,
+  tenant: false,
+  params: workspaceIdParamsSchema,
+  body: updateWorkspaceStatusRequest,
+  responses: ok('`data` is the workspace detail, re-read after the change committed.'),
+  errors: MANAGEMENT_WRITE_ERRORS,
+});
+
+operation({
+  method: 'get',
+  path: '/api/v1/admin/users',
+  tag: TAGS.admin,
+  operationId: 'adminListUsers',
+  summary: 'List platform accounts',
+  description:
+    'Requires platform administrator access. These are the people who sign in, not the ' +
+    'customers a workspace books — the two never meet on this surface. `search` matches email, ' +
+    'first name or last name case-insensitively. `workspaceCount` ignores memberships in ' +
+    'soft-deleted workspaces, so it always equals the length of the membership list the detail ' +
+    'endpoint returns.',
+  authenticated: true,
+  tenant: false,
+  query: listUsersQuerySchema,
+  responses: page('`data` is one page of account summaries with their workspace counts.'),
+  errors: MANAGEMENT_ERRORS,
+});
+
+operation({
+  method: 'get',
+  path: '/api/v1/admin/users/{id}',
+  tag: TAGS.admin,
+  operationId: 'adminGetUser',
+  summary: 'Read one platform account',
+  description:
+    'Requires platform administrator access. Adds contact and locale settings, lockout state, ' +
+    'the number of refresh-token sessions still live, and every workspace the account belongs ' +
+    'to with the role it holds there. `activeSessionCount` is the honest answer to "is this ' +
+    'person still signed in somewhere", which is what an operator needs both before suspending ' +
+    'an account and immediately afterwards.',
+  authenticated: true,
+  tenant: false,
+  params: userIdParamsSchema,
+  responses: ok('`data` is the account summary plus its session state and `memberships`.'),
+  errors: MANAGEMENT_ERRORS,
+});
+
+operation({
+  method: 'patch',
+  path: '/api/v1/admin/users/{id}/status',
+  tag: TAGS.admin,
+  operationId: 'adminUpdateUserStatus',
+  summary: 'Suspend, deactivate or reinstate an account',
+  description:
+    'Requires platform administrator access. Suspending or deactivating an account revokes ' +
+    'every live refresh token in the same transaction as the status change, so a session ' +
+    'cannot outlive the decision; authentication refuses a SUSPENDED or DEACTIVATED user on ' +
+    'every request, so the access token already in their hands dies at its next call too. ' +
+    'Reinstating revokes nothing — the person simply signs in again. Changing your own status ' +
+    'is refused with 409: an operator who suspends themselves has closed the only surface that ' +
+    'could let them back in. INVITED is not accepted, because it is a state the invitation ' +
+    'flow owns and setting it by hand would strand the account.',
+  authenticated: true,
+  tenant: false,
+  params: userIdParamsSchema,
+  body: updateUserStatusRequest,
+  responses: ok('`data` is the account detail, re-read after the change committed.'),
+  errors: MANAGEMENT_WRITE_ERRORS,
+});
+
+operation({
+  method: 'patch',
+  path: '/api/v1/admin/users/{id}/platform-role',
+  tag: TAGS.admin,
+  operationId: 'adminUpdatePlatformRole',
+  summary: 'Grant or withdraw platform administrator access',
+  description:
+    'Requires platform administrator access. ADMIN is not a workspace role: it grants this ' +
+    'entire surface and nothing at all inside any tenant. Two demotions are refused with 409 — ' +
+    'your own, and one that would leave the platform with no ACTIVE administrator. The second ' +
+    'is decided under a row lock, so two operators demoting each other at the same moment ' +
+    'cannot both read "there is still another admin" and both succeed.',
+  authenticated: true,
+  tenant: false,
+  params: userIdParamsSchema,
+  body: updatePlatformRoleRequest,
+  responses: ok('`data` is the account detail, re-read after the change committed.'),
+  errors: MANAGEMENT_WRITE_ERRORS,
+});
+
+operation({
+  method: 'get',
+  path: '/api/v1/admin/audit-logs',
+  tag: TAGS.admin,
+  operationId: 'adminListAuditLogs',
+  summary: 'Search the audit trail across tenants',
+  description:
+    'Requires platform administrator access. The same rows a workspace sees in its own ' +
+    'activity feed, plus the platform-level ones that belong to no tenant and carry a null ' +
+    '`businessId`. `from` and `to` are inclusive calendar dates compared against the moment ' +
+    'the row was written, and rows come back newest first. `businessId` narrows the search ' +
+    'here rather than asserting a tenant — the distinction that makes this surface possible at ' +
+    'all.',
+  authenticated: true,
+  tenant: false,
+  query: listAuditLogsQuerySchema,
+  responses: page('`data` is one page of audit entries, newest first.'),
+  errors: MANAGEMENT_ERRORS,
+});
+
+operation({
+  method: 'get',
+  path: '/api/v1/admin/health',
+  tag: TAGS.admin,
+  operationId: 'adminSystemHealth',
+  summary: 'Dependency and delivery-backlog status',
+  description:
+    'Requires platform administrator access. Distinct from the unauthenticated /health and ' +
+    '/ready probes, which answer "is this process alive" for an orchestrator: this one reports ' +
+    'on PostgreSQL, Redis and the notification outbox, which is operator information rather ' +
+    'than something to expose at the edge. It answers 200 even when a dependency is down — a ' +
+    '503 would make the one page that could explain an outage disappear during one — so read ' +
+    '`database.ok`, `redis.ok` and the outbox counters rather than the status code.',
+  authenticated: true,
+  tenant: false,
+  responses: ok(
+    '`data` carries the database and Redis checks, the outbox backlog including `dueNow` and ' +
+      'the age of the oldest pending message, and the API build metadata.',
+  ),
+  errors: MANAGEMENT_ERRORS,
+});
+
+// ---------------------------------------------------------------------------
 // Public booking — /api/v1/public, unauthenticated
 // ---------------------------------------------------------------------------
 
@@ -2600,7 +2850,7 @@ MeetFlow is a multi-tenant scheduling API. Every path below is transcribed from 
 every request schema is imported from the module that validates it at runtime — so this document
 cannot describe an endpoint the server does not serve, or a payload it would not accept.
 
-### Two surfaces
+### Three surfaces
 
 **\`/api/v1/*\` — authenticated management.** Mounted behind \`authenticate → rate limit →
 requireTenant\`, applied at the router rather than per route so a new endpoint cannot ship
@@ -2612,6 +2862,12 @@ endpoints exist.
 booking-link slug, IP rate limits are tight, and only opaque public identifiers are ever exposed.
 An unknown path here answers 404 rather than falling through into the authenticated chain and
 answering a misleading 401.
+
+**\`/api/v1/admin/*\` — platform administration.** Mounted behind \`authenticate → rate limit →
+requirePlatformAdmin\` and deliberately **not** behind \`requireTenant\`: an operator holds no
+membership in the workspaces they administer, so tenant resolution would refuse every call. It is
+the only surface that reads across tenants, and what it reads is workspaces, platform accounts and
+counts — never a workspace's customers, appointments or notes.
 
 ### Choosing a workspace
 

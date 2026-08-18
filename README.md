@@ -13,8 +13,8 @@ DST transitions and concurrent booking attempts.
 
 ## Status
 
-A **complete, working product**: 148 TypeScript files on the server, 121 on the
-client, 42 tables, 82 documented endpoints, and a customer-facing booking flow
+A **complete, working product**: 152 TypeScript files on the server, 133 on the
+client, 42 tables, 92 documented endpoints, and a customer-facing booking flow
 that a real business could publish today.
 
 Every claim below is backed by something that runs — see
@@ -48,7 +48,7 @@ Every claim below is backed by something that runs — see
 ```
 meetflow/
 ├── client/                  React + TypeScript + Vite + Tailwind v4
-│   └── src/pages/           auth · owner · staff · customer · public booking
+│   └── src/pages/           auth · owner · staff · customer · public booking · admin
 ├── server/
 │   ├── migrations/          9 SQL migrations → 42 tables
 │   ├── seeders/
@@ -70,6 +70,24 @@ meetflow/
 
 **Stack:** Node 20+, Express 4, TypeScript (strict), PostgreSQL 16 + Sequelize 6,
 Redis 7, BullMQ, Socket.IO, zod, Luxon, pino, vitest, Playwright, Docker.
+
+### Three API surfaces
+
+```
+/api/v1/public/*   unauthenticated booking; tenant comes from a validated link slug
+/api/v1/admin/*    platform administration; authenticate → requirePlatformAdmin
+/api/v1/*          authenticated management; authenticate → requireTenant
+```
+
+The admin surface is the only one that reads across tenants, and it is
+deliberately **not** behind `requireTenant`: an operator holds no membership in
+the workspaces they administer, so tenant resolution would 404 every call. It
+exposes workspaces, platform accounts and counts — never a customer's name,
+email or phone, an appointment's contents, or a note.
+
+The client draws the same line: `/admin` is a sibling of `/app`, not a page
+inside it, with its own shell and its own guard. See
+[docs/admin-panel.md](docs/admin-panel.md).
 
 ### Layering
 
@@ -106,6 +124,27 @@ npm run dev                   # API :4000, worker, client :5173
 If your machine already runs PostgreSQL or Redis, set `POSTGRES_HOST_PORT` and
 `REDIS_HOST_PORT` in `.env` (and match `DATABASE_URL` / `REDIS_URL`) — the
 compose file reads them.
+
+### Demo accounts
+
+The seed builds one workspace, Aurora Wellness Studio in Bengaluru, and the
+people who work in it. Every account shares the password `MeetFlow!Demo123`,
+overridable with `SEED_DEFAULT_PASSWORD`. The seeders refuse to run unless
+`SEED_ENABLED` is truthy, and a production configuration refuses to boot with it
+set.
+
+| Sign in as                        | What you get                                                                                                                                           |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `priya.shah@aurorawellness.test`  | Workspace owner — everything inside the workspace                                                                                                      |
+| `rahul.menon@aurorawellness.test` | Manager — operations, but not roles or deletion                                                                                                        |
+| `ananya.iyer@aurorawellness.test` | Staff — own schedule and assigned appointments only                                                                                                    |
+| `admin@meetflow.dev`              | Platform administrator **and** a receptionist in the demo workspace: signing in lands in the normal app, and the platform panel is in the account menu |
+
+The last row is the shape of the feature, not a shortcut for the demo.
+`platform_role` grants nothing inside a tenant and a membership grants nothing
+across the platform, so an operator who wants a front-desk session has to hold a
+real membership like anybody else. The seeded customers have portal accounts
+with the same password.
 
 ### Health
 
@@ -165,6 +204,13 @@ verified rather than assumed.
 - `tests/integration/tenancy.test.ts` — over real HTTP: a member with no
   permission overrides resolves, cross-tenant ids return 404 not 403, DENY beats
   the role, GRANT lifts a restrictive one.
+- `tests/integration/admin.test.ts` — the platform surface over real HTTP: an
+  operator with no membership anywhere reads every endpoint, an ordinary user is
+  refused on all of them, a workspace detail response about a real patient
+  contains neither their email nor their notes, suspending a workspace locks its
+  owner out and reinstating restores them, suspending an account ends the
+  session it is holding right now, and an administrator can neither change their
+  own standing nor demote the last active one.
 - `e2e/tests/` — the whole product through a browser: register → workspace →
   location → service → staff → hours → resource → booking link → a customer
   books on the public page → the owner sees it → reschedule and cancel. Plus two
@@ -185,6 +231,10 @@ verified rather than assumed.
   among workspaces the caller already belongs to.
 - **Authorisation** — permission-based, with per-member GRANT/DENY overrides
   where DENY always wins. Four built-in roles; `STAFF` is deliberately minimal.
+- **Platform administration** — `platform_role = ADMIN` gates `/api/v1/admin` at
+  the mount and grants nothing inside any workspace. There is no self-service
+  route to it, every mutation is audited, and an operator can change neither
+  their own standing nor that of the last active administrator.
 - **Rate limiting** — Redis-backed and cluster-wide, with an in-memory
   insurance limiter so a Redis outage degrades protection rather than removing it.
 - **Public identifiers** — 130-bit random, prefixed, opaque. Internal UUIDs are
@@ -204,6 +254,7 @@ verified rather than assumed.
 | `docs/TimezoneAndDST.md`           | The two time models and the DST rules     |
 | `docs/BookingConcurrency.md`       | The five layers of booking safety         |
 | `docs/MultiTenancy.md`             | Tenant derivation and isolation testing   |
+| `docs/admin-panel.md`              | The platform surface and its privacy line |
 | `docs/RedisArchitecture.md`        | Key registry, TTLs, degradation behaviour |
 | `docs/SocketIOEvents.md`           | Event names, rooms, authorisation         |
 | `docs/NotificationArchitecture.md` | Outbox, retries, idempotency              |
@@ -227,8 +278,6 @@ Stated plainly, so nothing here is mistaken for finished work.
 - **External calendar sync** (Google, Outlook) and **payments**. Deliberately
   not stubbed — see `docs/ADR/README.md` (ADR-0009) for why an empty adapter is
   worse than an honest absence.
-- **Admin (platform) dashboard.** Platform-admin routes exist on the server;
-  there is no dedicated UI for them.
 - **CI pipeline.** The quality gates all run locally via `npm run verify`;
   nothing wires them to a CI service yet.
 - The security gaps recorded in

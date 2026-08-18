@@ -7,6 +7,7 @@ import {
   Monitor,
   Moon,
   Plus,
+  ShieldCheck,
   Sun,
   UserCircle,
   X,
@@ -270,6 +271,27 @@ function UserMenu(): JSX.Element | null {
       <DropdownLinkItem to="/app/profile" icon={<UserCircle className="size-4" />}>
         My profile
       </DropdownLinkItem>
+      {/*
+       * The one bridge from the tenant app to the platform surface. It is
+       * deliberately not in the sidebar: that list is workspace navigation,
+       * filtered by workspace permissions, and platform administration is not
+       * one of them — it is a property of the account, not of a membership.
+       * Without this entry `/admin` exists but nothing anywhere links to it, and
+       * an operator has to know to type the URL.
+       *
+       * Gated on the same bit the server gates `/api/v1/admin` on, so the link
+       * is never shown to someone the API would refuse. Its own group, above the
+       * sign-out separator, because leaving the workspace for the platform is a
+       * change of surface rather than another account setting.
+       */}
+      {user.platformRole === 'ADMIN' ? (
+        <>
+          <DropdownSeparator />
+          <DropdownLinkItem to="/admin" icon={<ShieldCheck className="size-4" />}>
+            Platform administration
+          </DropdownLinkItem>
+        </>
+      ) : null}
       <DropdownSeparator />
       <DropdownItem
         icon={<LogOut className="size-4" />}

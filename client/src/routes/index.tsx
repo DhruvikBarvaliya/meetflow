@@ -4,11 +4,23 @@ import { AppShell } from '@/components/layout/AppShell';
 import { ProtectedRoute } from '@/components/layout/ProtectedRoute';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { PERMISSIONS, type PermissionKey } from '@/lib/permissions';
+// Eager, unlike everything else under `@/pages/admin`: this is the guard that
+// decides whether the rest of the surface is fetched at all, so it cannot itself
+// live behind the boundary it protects. It pulls in nothing the tenant frame has
+// not already loaded.
+import { AdminRoute } from '@/pages/admin/AdminRoute';
 
 /*
  * Every page is code-split. The auth pages and the public booking flow have no
  * overlap with the management app, so a customer following a booking link never
  * downloads the dashboard, and a signing-in user never downloads the diary.
+ *
+ * The platform admin surface is split the same way, and there it matters most.
+ * `AdminRoute` refuses a non-administrator before any of its children render,
+ * so the chunks holding the operator views — every workspace and every account
+ * on the deployment — are only ever requested by an account that holds the
+ * role. Nobody working in their own diary downloads the panel that could
+ * suspend it.
  */
 const LoginPage = lazy(() => import('@/pages/auth/LoginPage'));
 const RegisterPage = lazy(() => import('@/pages/auth/RegisterPage'));
@@ -42,6 +54,25 @@ const MyAppointmentsPage = lazy(() => import('@/pages/customer/MyAppointmentsPag
 const CustomerBookingDetailPage = lazy(() => import('@/pages/customer/AppointmentDetailPage'));
 const PreferencesPage = lazy(() => import('@/pages/customer/PreferencesPage'));
 const ProfilePage = lazy(() => import('@/pages/customer/ProfilePage'));
+
+/*
+ * The platform shell is lazy alongside its pages rather than imported like
+ * `AppShell` above. It is the frame an operator works in, not one a tenant user
+ * ever sees, and keeping it behind `AdminRoute` is what makes the claim in the
+ * header comment true of the whole surface instead of only the pages inside it.
+ * `AdminShell` is a named export, hence the mapping React.lazy asks for.
+ */
+const AdminShell = lazy(() =>
+  import('@/pages/admin/AdminShell').then((module) => ({ default: module.AdminShell })),
+);
+
+const AdminOverviewPage = lazy(() => import('@/pages/admin/AdminOverviewPage'));
+const AdminWorkspacesPage = lazy(() => import('@/pages/admin/AdminWorkspacesPage'));
+const AdminWorkspaceDetailPage = lazy(() => import('@/pages/admin/AdminWorkspaceDetailPage'));
+const AdminUsersPage = lazy(() => import('@/pages/admin/AdminUsersPage'));
+const AdminUserDetailPage = lazy(() => import('@/pages/admin/AdminUserDetailPage'));
+const AdminAuditPage = lazy(() => import('@/pages/admin/AdminAuditPage'));
+const AdminHealthPage = lazy(() => import('@/pages/admin/AdminHealthPage'));
 
 const NotFoundPage = lazy(() => import('@/pages/NotFoundPage'));
 
@@ -156,6 +187,43 @@ const router = createBrowserRouter([
       { path: 'preferences', element: guarded(PreferencesPage) },
       { path: 'profile', element: guarded(ProfilePage) },
 
+      { path: '*', element: page(NotFoundPage) },
+    ],
+  },
+
+  // --- Platform administration ----------------------------------------------
+  // A sibling of `/app`, deliberately not a child of it. The admin surface has
+  // its own shell and its own guard, and nesting it under the tenant frame would
+  // wrap a view that spans every workspace in a workspace switcher and a sidebar
+  // filtered by workspace permissions — permissions a platform administrator,
+  // who may hold no membership anywhere on the deployment, does not have. The
+  // server draws the same line: `/api/v1/admin` sits behind
+  // `requirePlatformAdmin` and *not* behind `requireTenant`.
+  {
+    path: '/admin',
+    element: (
+      <AdminRoute>
+        <Suspense fallback={<RouteFallback />}>
+          <AdminShell />
+        </Suspense>
+      </AdminRoute>
+    ),
+    // `page()` rather than `guarded()` throughout: `AdminRoute` has already
+    // settled the session and the one bit that governs this whole tree, and
+    // `ProtectedRoute`'s permissions are workspace permissions, which do not
+    // apply to an operator with no workspace.
+    children: [
+      { index: true, element: page(AdminOverviewPage) },
+      { path: 'workspaces', element: page(AdminWorkspacesPage) },
+      // `:id` on both detail routes, because that is the name the pages read
+      // from `useParams`; renaming it here would silently hand them undefined.
+      { path: 'workspaces/:id', element: page(AdminWorkspaceDetailPage) },
+      { path: 'users', element: page(AdminUsersPage) },
+      { path: 'users/:id', element: page(AdminUserDetailPage) },
+      { path: 'audit', element: page(AdminAuditPage) },
+      { path: 'health', element: page(AdminHealthPage) },
+      // Keeps a mistyped admin path inside the platform shell, so the operator
+      // is not thrown out to the bare not-found page and back through the guard.
       { path: '*', element: page(NotFoundPage) },
     ],
   },
