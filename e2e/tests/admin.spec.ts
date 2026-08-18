@@ -135,8 +135,11 @@ async function tileFigure(scope: Locator, label: string): Promise<number> {
       message: `the "${label}" tile never settled on a figure`,
     })
     // Digits, with the group separators `formatNumber` may insert — including the
-    // non-breaking and narrow no-break spaces some locales use.
-    .toMatch(/^\d[\d,.   ]*$/);
+    // non-breaking and narrow no-break spaces some locales use. Written as
+    // escapes, not the characters themselves: invisible whitespace inside a
+    // character class is unreviewable, and eslint's no-irregular-whitespace
+    // rejects it outright.
+    .toMatch(/^\d[\d,.\u00a0\u202f ]*$/);
 
   return Number(((await value.textContent()) ?? '').replace(/\D/g, ''));
 }

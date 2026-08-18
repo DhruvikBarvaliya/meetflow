@@ -4,5 +4,9 @@ build/
 coverage/
 playwright-report/
 test-results/
+# Generated API contracts. Both are written by src/scripts/export-*.ts with
+# JSON.stringify(…, null, 2); reformatting them here would make every
+# regeneration fail `format:check` until someone re-ran Prettier by hand.
 docs/postman/*.json
+docs/openapi.json
 package-lock.json

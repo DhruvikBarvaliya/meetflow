@@ -69,7 +69,12 @@ export default tseslint.config(
   },
   {
     // Node scripts are plain ESM utilities.
-    files: ['scripts/**/*.mjs'],
+    //
+    // Matched at any depth, not just the root `scripts/`: server/scripts/ holds
+    // the same kind of file, and scoping this to one directory meant a script
+    // added beside the workspace it serves failed `no-undef` on `process` and
+    // `console` — which is exactly what happened to server/scripts/db-reset.mjs.
+    files: ['**/scripts/**/*.mjs'],
     languageOptions: { globals: { ...globals.node } },
     rules: { 'no-console': 'off' },
   },
