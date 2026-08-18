@@ -5,17 +5,37 @@ contract at `/api/docs/openapi.json`, both generated from the same zod schemas
 that validate requests at runtime — so the documentation cannot drift from the
 implementation.
 
-## Two surfaces
+## Five surfaces
 
 | Surface            | Auth         | Tenant context                    |
 | ------------------ | ------------ | --------------------------------- |
 | `/api/v1/public/*` | none         | resolved from a booking-link slug |
 | `/api/v1/auth/*`   | none         | none                              |
+| `/api/v1/admin/*`  | bearer token | **none** — spans every workspace  |
+| `/api/v1/me/*`     | bearer token | **none** — scoped to the person   |
 | `/api/v1/*`        | bearer token | ACTIVE membership                 |
+
+Three of these are authenticated and only one is tenant-scoped, which is the
+detail worth internalising before reading further.
+
+`/admin/*` requires `platformRole = ADMIN` and deliberately does **not** resolve
+a tenant: an operator holds no membership in the workspaces they administer, so
+tenant resolution would 404 every call. It exposes workspaces, accounts and
+counts, and has nowhere in its response shapes to put a customer's name, email
+or a note.
+
+`/me/*` is the mirror image. A customer holds no membership either, so every
+query there is scoped by `Customer.userId` instead — a person sees their own
+bookings across every workspace that knows them, and nothing else.
+
+Mount order enforces this: both sit above the management router, which carries
+no path prefix and would otherwise swallow them into a tenant resolution neither
+caller can satisfy.
 
 An unauthenticated request to an unknown path under `/api/v1` answers **401**,
 not 404 — the management surface is deliberately not enumerable. The public
-surface answers a normal 404.
+surface answers a normal 404, and so do `/admin` and `/me` once the caller has
+cleared their own guard.
 
 ## Envelope
 

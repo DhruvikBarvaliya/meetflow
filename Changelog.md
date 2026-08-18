@@ -54,14 +54,37 @@ first release is cut.
 - Tenant isolation derived from membership, with 404-not-403 semantics.
 - Append-only audit log with actor, tenant, entity and request correlation.
 - Transactional notification outbox with reminders, retries and a recovery sweep.
-- BullMQ queues, worker process, webhook delivery with HMAC signing, and
-  periodic maintenance jobs.
+- BullMQ queues, worker process and periodic maintenance jobs.
 - Authenticated Socket.IO with membership-derived rooms and a worker→API bridge.
 - Public booking API, waitlist, analytics and CSV reporting.
-- OpenAPI 3.0 document (82 paths) and Postman collection generated from the same
-  zod schemas that validate requests.
+- OpenAPI 3.0 document and Postman collection generated from the same zod
+  schemas that validate requests. CI regenerates both and fails on any diff, so
+  the count here is deliberately not restated — a hand-maintained figure is
+  exactly the kind of claim that goes stale unnoticed.
 - Deterministic development seed data for a complete demo workspace.
 - Production Dockerfiles for the API, worker and client.
+
+**Operating surfaces**
+
+- **Platform administration** (`/api/v1/admin`, `/admin` in the client): the
+  tenant register, the account register, a cross-workspace audit feed and
+  dependency health. Not tenant-scoped, and shaped so it cannot return customer
+  data.
+- **Memberships** (`/api/v1/members`): invite by email, accept, change role,
+  remove, and per-member GRANT/DENY permission overrides. Until this landed, a
+  workspace could not gain a second member without editing the database by hand,
+  which left three of the four roles unreachable.
+- **Tenant audit trail** (`/api/v1/audit-logs`): a business can read its own
+  trail, filtered and paginated. Eighteen services had been writing rows that
+  only a platform operator could read.
+- **Webhooks** (`/api/v1/webhooks`): endpoint management, a signed test send,
+  delivery history, and the fan-out wired into the appointment lifecycle. The
+  delivery machinery already existed and had no caller; this makes it reachable.
+- **Customer portal** (`/api/v1/me`): a customer signs in and sees their own
+  bookings across every workspace that knows them, and can cancel or reschedule
+  through the same lifecycle service every other surface uses.
+- **CI**: the repository's own `verify` gate, a contract-drift check, end-to-end
+  tests, image builds and the secret scanner, all on every push.
 
 ### Fixed
 
@@ -87,6 +110,22 @@ first release is cut.
 
 - `/api/docs` is no longer mounted in production, where it would have
   enumerated the management surface without authentication.
+- **HTML injection into outgoing email.** The escaping pass ran on an
+  already-substituted body, so it escaped placeholders that no longer existed
+  and then interpolated the values raw into markup. A customer's own first name,
+  typed into a public booking form, reached the recipient as live HTML.
+- **Password spraying was unthrottled.** The credential bucket keyed on
+  `IP|email`, so one host trying one password against many accounts spent a
+  single point in each of many separate buckets and was never refused. A per-IP
+  bucket now sits in front of it, and credential buckets alone fail closed.
+- **Sockets survived "log out everywhere".** The handshake re-read the user and
+  membership but never the token family, so a revoked session kept receiving
+  live workspace events until its access token expired.
+- **A production deploy on defaults sent no email at all**, while marking every
+  confirmation and reminder as sent. The console transport is now refused in
+  production, alongside the existing guards.
+- **Account lockout never escalated.** Eight failures bought fifteen minutes and
+  reset the counter, so every fifteen minutes bought eight more indefinitely.
 
 ### Known gaps
 

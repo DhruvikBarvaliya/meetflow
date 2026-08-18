@@ -49,6 +49,22 @@ migration. This bit three constraints during development; they are now
 | `…000700-create-notifications`  | `notification_templates`, `notifications`, `automation_rules`, `automation_executions`                                                                                                                                                      |
 | `…000800-create-audit-webhooks` | `audit_logs`, `webhook_endpoints`, `webhook_deliveries`                                                                                                                                                                                     |
 
+## Entities that were deliberately collapsed
+
+The domain model names several concepts that have no table of their own. Each
+was folded into an existing one on purpose, and the reasoning is recorded here
+so that a reader who goes looking for the missing table finds an answer rather
+than an omission.
+
+| Concept                      | Where it lives                 | Why                                                                                                                                                                                       |
+| ---------------------------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Calendar` / `CalendarEvent` | projected, never stored        | A calendar is a query over `appointments`, not an entity. Storing it would create a second copy that can disagree with the diary. See ADR-0009.                                           |
+| `Reminder`                   | `notifications.scheduled_for`  | A reminder is a notification whose send time is in the future. A separate table would duplicate the outbox's retry, dedupe and recovery machinery. See ADR-0005.                          |
+| `NotificationDelivery`       | `notifications` status columns | One row per message, carrying its own status, attempt count and last error. A delivery table only earns its place with multiple recipients per message, which this product does not have. |
+| `Cancellation`               | `appointment_status_history`   | A cancellation is a status transition with an actor, a reason and a timestamp — which is what that table already records, for every transition rather than only this one.                 |
+| `AppointmentType`            | `services`                     | The type of an appointment _is_ the service booked. A parallel taxonomy would have to be kept in step with the catalogue by hand.                                                         |
+| `ResourceAvailability`       | not modelled                   | **A gap, not a decision.** Resources have capacity and requirements but no availability calendar, so a room cannot yet be marked out of service for a morning.                            |
+
 ## The constraints that carry the product
 
 ### No double booking

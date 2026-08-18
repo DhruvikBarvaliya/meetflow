@@ -198,3 +198,82 @@ instances answering one availability query have to agree.
 
 **Consequence.** If an AI-assisted strategy is added, it goes behind this same
 interface and booking correctness must not depend on it.
+
+---
+
+## ADR-0011 — BullMQ as the queue, with PostgreSQL as the system of record
+
+**Status:** accepted
+
+**Decision.** Background work runs on BullMQ over the same Redis the cache and
+rate limiter use. Queues: notifications, webhooks, maintenance. The worker is a
+separate process in a separate container, and job payloads carry an identifier
+and nothing else — every worker re-reads its row from PostgreSQL before acting.
+
+**Why BullMQ.** It gives durable retries with exponential backoff, delayed jobs
+(which is what a reminder is), stalled-job recovery and concurrency control,
+without adding a broker to the deployment. The alternative worth taking
+seriously was polling PostgreSQL directly with `SELECT … FOR UPDATE SKIP
+LOCKED`, which removes a dependency entirely; it was rejected because delayed
+jobs then need a scheduler of their own, and reminders are the majority of the
+workload.
+
+**Why the payload carries only an id.** A job that carried the message body
+would deliver whatever was true when it was enqueued — a reminder for an
+appointment that has since moved would still name the old time. Re-reading makes
+the row the single truth and the queue merely a trigger.
+
+**Why a separate process.** Delivery latency must never become API latency. In
+development `RUN_WORKER_IN_API=true` runs both in one process for convenience,
+and the guard that permits it is deliberately development-only.
+
+**The cost, stated plainly.** Redis is now on the delivery path even though it is
+not on the request path. A Redis outage stops delivery; it does not stop booking,
+because the outbox row is already committed and the recovery sweep will pick it
+up. That asymmetry is the whole reason the outbox exists — see ADR-0005.
+
+**What this does not cover.** A job id is `notification:<id>`, and BullMQ treats
+`add` for an existing id as a no-op — including one already in the completed
+set. Anything that requeues a row must drop the old job key first, or the
+requeue is silently discarded. This bit us once; it is now handled in the sweep
+and noted here so the next person does not rediscover it.
+
+---
+
+## ADR-0012 — The scheduling engine is three layers, and the innermost has no I/O
+
+**Status:** accepted
+
+**Decision.** Availability is computed in three separate layers:
+
+1. **Rule resolution** (`scheduling/availability.service.ts`) — reads business
+   hours, staff rules, overrides, holidays, blackouts and existing appointments,
+   and resolves them into concrete instants in the workspace timezone.
+2. **Slot generation** (`scheduling/slotEngine.ts`) — a pure function. No
+   database, no clock of its own: `now` is a parameter. Given windows, busy
+   intervals and a policy, it returns slots.
+3. **Verification at commit** (`booking.service.ts`) — re-runs the same policy
+   against the same data inside the booking transaction.
+
+**Why the middle layer is pure.** Slot generation is where the subtle bugs live —
+buffers, intervals, capacity, DST boundaries — and it is the layer that most
+needs exhaustive testing. Making it I/O-free means those tests are milliseconds
+rather than seconds, need no fixtures, and can enumerate edge cases that would be
+impractical to construct in a database. Passing `now` as a parameter rather than
+calling the clock is what makes "a slot that is one minute inside the notice
+window" a test rather than a race.
+
+**Why verification is a separate third layer rather than trust in the first
+two.** Search and commit are separated in time by however long a customer takes
+to fill in a form. Anything can happen in between. The layer exists because the
+answer must be recomputed, not remembered.
+
+**The invariant that binds them.** A slot the search offers must never be refused
+at commit, and a slot the search hides must never be bookable. Both directions
+are failures: the first is a customer filling in a form for nothing, the second
+is a policy that is decorative. The layers therefore resolve policy through one
+shared path, and the tests assert the invariant directly by booking what the
+search offered.
+
+**The cost.** Rule resolution runs twice for a booking — once to offer, once to
+confirm. That is deliberate and cheap next to being wrong.

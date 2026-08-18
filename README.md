@@ -13,21 +13,27 @@ DST transitions and concurrent booking attempts.
 
 ## Status
 
-A **complete, working product**: 152 TypeScript files on the server, 133 on the
-client, 42 tables, 92 documented endpoints, and a customer-facing booking flow
-that a real business could publish today.
+A **working product**: 168 TypeScript files on the server, 133 on the client,
+42 tables, 155 documented operations across 111 paths, and a customer-facing
+booking flow that a real business could publish today.
 
 Every claim below is backed by something that runs — see
 [Verification](#verification) — and everything that is _not_ built is listed in
-[What is not built yet](#what-is-not-built-yet) rather than glossed over.
+[What is not built yet](#what-is-not-built-yet) rather than glossed over. The
+open gaps are enumerated with evidence in [docs/GapAudit.html](docs/GapAudit.html)
+and tracked against the specification in
+[docs/ProductRequirements.md](docs/ProductRequirements.md); the honest reading
+today is that the scheduling core is production-grade and parts of the
+surrounding surface are still being closed.
 
 |              |                                                                 |
 | ------------ | --------------------------------------------------------------- |
-| Server tests | **177 passing** (unit + integration, real PostgreSQL)           |
-| End-to-end   | **35 passing** (Playwright, real stack, no mocks)               |
+| Server tests | **366 passing** (unit + integration, real PostgreSQL)           |
+| End-to-end   | **43 passing** (Playwright, real stack, no mocks)               |
 | Typecheck    | clean, strict, across server + client + e2e                     |
 | Lint         | clean                                                           |
 | Builds       | server and client both build; production image runs as non-root |
+| CI           | every gate above runs on push; contracts fail on drift          |
 
 ## Why it is different
 
