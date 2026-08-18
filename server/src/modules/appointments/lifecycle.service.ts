@@ -67,6 +67,8 @@ import { addMinutes, differenceInMinutes, formatForHumans } from '../../utils/ti
 import { AuditActions, recordAudit } from '../audit/audit.service';
 import { enqueueNotification } from '../notifications/notification.service';
 import { evaluateWaitlistForSlot } from '../waitlist/waitlist.matcher';
+import { publishAppointmentWebhook } from '../webhooks/webhooks.service';
+import { WebhookEvents, type WebhookEvent } from '../webhooks/webhooks.validation';
 
 const log = createLogger('lifecycle');
 
@@ -643,6 +645,15 @@ export async function rescheduleAppointment(input: RescheduleInput): Promise<App
       }
     }
 
+    // Inside the transaction, like the outbox rows above and for the same
+    // reason: a move that rolls back must not tell a subscriber the appointment
+    // is somewhere it is not. The previous time travels with the event because
+    // a subscriber's own calendar needs to know which entry to replace.
+    await publishAppointmentWebhook(WebhookEvents.APPOINTMENT_RESCHEDULED, appointment, {
+      transaction,
+      extra: { previousStartsAt: previous.startsAt, previousEndsAt: previous.endsAt },
+    });
+
     return appointment;
   });
 
@@ -840,6 +851,15 @@ export async function cancelAppointment(input: CancelInput): Promise<Appointment
       );
     }
 
+    // Only the full cancellation is announced. One attendee leaving a group
+    // session returns above without reaching here, and rightly so: the session
+    // is still happening, so `appointment.cancelled` would be a lie to every
+    // subscriber and to the other attendees' calendars.
+    await publishAppointmentWebhook(WebhookEvents.APPOINTMENT_CANCELLED, appointment, {
+      transaction,
+      extra: { reason: input.reason ?? null, lateCancellation: isLate },
+    });
+
     return { appointment, fullyCancelled: true };
   });
 
@@ -916,6 +936,12 @@ async function transition(
   apply: (appointment: Appointment) => Record<string, unknown>,
   auditAction: string,
   socketEvent: (typeof SocketEvents)[keyof typeof SocketEvents],
+  /**
+   * Optional because not every transition is a subscribable event: approval and
+   * rejection are internal moderation steps, and the webhook catalogue promises
+   * five appointment events rather than "whatever the state machine does".
+   */
+  webhookEvent?: WebhookEvent,
 ): Promise<Appointment> {
   const updated = await sequelize.transaction(async (transaction) => {
     const appointment = await loadAppointment(
@@ -962,6 +988,13 @@ async function transition(
       },
       { transaction },
     );
+
+    // Inside the transaction with the status change it announces; the socket
+    // emission below is deliberately outside it, because a real-time nudge that
+    // arrives twice is harmless and one that arrives early is not.
+    if (webhookEvent) {
+      await publishAppointmentWebhook(webhookEvent, appointment, { transaction });
+    }
 
     return appointment;
   });
@@ -1060,6 +1093,7 @@ export async function completeAppointment(input: TransitionInput): Promise<Appoi
     () => ({ completedAt: new Date() }),
     AuditActions.APPOINTMENT_COMPLETED,
     SocketEvents.appointmentCompleted,
+    WebhookEvents.APPOINTMENT_COMPLETED,
   );
 
   if (updated.customerId) {
@@ -1101,6 +1135,7 @@ export async function markNoShow(input: TransitionInput): Promise<Appointment> {
     () => ({ noShowAt: new Date() }),
     AuditActions.APPOINTMENT_NO_SHOW,
     SocketEvents.appointmentNoShow,
+    WebhookEvents.APPOINTMENT_NO_SHOW,
   );
 
   if (updated.customerId) {

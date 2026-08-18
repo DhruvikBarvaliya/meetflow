@@ -68,6 +68,14 @@ import {
   updateStaffSchema,
 } from '../modules/staff/staff.validation';
 import {
+  acceptInvitationSchema,
+  inviteMemberSchema,
+  listMembersQuerySchema,
+  memberIdParamsSchema,
+  replaceMemberPermissionsSchema,
+  updateMemberSchema,
+} from '../modules/members/members.validation';
+import {
   categoryIdParamsSchema,
   createCategorySchema,
   createServiceSchema,
@@ -134,11 +142,23 @@ import {
   updateWaitlistEntrySchema,
   waitlistIdParamSchema,
 } from '../modules/waitlist/waitlist.validation';
+import {
+  createWebhookSchema,
+  listDeliveriesQuerySchema,
+  listWebhooksQuerySchema,
+  updateWebhookSchema,
+  webhookIdParamsSchema,
+} from '../modules/webhooks/webhooks.validation';
 import { analyticsRangeQuerySchema } from '../modules/analytics/analytics.validation';
 import {
   appointmentExportQuerySchema,
   appointmentReportQuerySchema,
 } from '../modules/analytics/reports.validation';
+import {
+  auditEntryIdParamsSchema,
+  exportAuditEntriesQuerySchema,
+  listAuditEntriesQuerySchema,
+} from '../modules/audit/audit.validation';
 import {
   listAuditLogsQuerySchema,
   listUsersQuerySchema,
@@ -157,6 +177,13 @@ import {
   publicAvailabilityQuerySchema,
   reschedulePublicAppointmentSchema,
 } from '../modules/publicBooking/publicBooking.validation';
+import {
+  bookingPublicIdParamsSchema,
+  cancelBookingSchema,
+  listBookingsQuerySchema,
+  rescheduleBookingSchema,
+  updatePreferencesSchema,
+} from '../modules/customers/portal.validation';
 
 // `.openapi()` is added to every zod schema by this call, including the ones the
 // modules above already constructed: it patches the shared prototype, so the
@@ -180,6 +207,7 @@ const TAGS = {
   locations: 'Locations',
   teams: 'Teams',
   staff: 'Staff',
+  members: 'Members',
   services: 'Services',
   resources: 'Resources',
   customers: 'Customers',
@@ -187,9 +215,12 @@ const TAGS = {
   bookingLinks: 'Booking Links',
   appointments: 'Appointments',
   waitlist: 'Waitlist',
+  webhooks: 'Webhooks',
   analytics: 'Analytics',
   reports: 'Reports',
+  audit: 'Audit',
   admin: 'Platform Admin',
+  customerPortal: 'Customer Portal',
   publicBooking: 'Public Booking',
 } as const;
 
@@ -215,6 +246,19 @@ const TAG_DESCRIPTIONS: Array<{ name: string; description: string }> = [
   { name: TAGS.locations, description: 'The sites appointments can be held at.' },
   { name: TAGS.teams, description: 'Groups of staff that share an assignment strategy.' },
   { name: TAGS.staff, description: 'Bookable provider profiles and the services they deliver.' },
+  {
+    name: TAGS.members,
+    description:
+      'Who belongs to the workspace, what each of them may do, and how somebody joins or ' +
+      'leaves. This is the surface that hands out authority, so what it guarantees is what ' +
+      'cannot happen: the last account able to manage roles cannot be demoted, suspended or ' +
+      'removed, nobody may edit their own membership or the owners, and a member still ' +
+      'holding upcoming appointments cannot be removed out from under them. A role change ' +
+      'lands on the next request the affected person makes — effective permissions are read ' +
+      'from the membership on every call rather than baked into a token — so a mistake is ' +
+      'undone as fast as it was made, and revoking access does not wait for a session to ' +
+      'expire. Two paths here are authenticated but not tenant-scoped, and say so.',
+  },
   { name: TAGS.services, description: 'The service catalogue and its categories.' },
   {
     name: TAGS.resources,
@@ -238,10 +282,34 @@ const TAG_DESCRIPTIONS: Array<{ name: string; description: string }> = [
     name: TAGS.waitlist,
     description: 'Customers waiting for a slot, and converting them into one.',
   },
+  {
+    name: TAGS.webhooks,
+    description:
+      'Outbound event delivery: where a workspace wants to be told when its diary changes. ' +
+      "Registering an endpoint points a workspace's event stream at a server of the " +
+      "registrant's choosing, which is a materially larger act than reading delivery " +
+      'history, so the built-in roles grant the two separately and only an owner may ' +
+      'register one. The ' +
+      'signing secret is returned exactly once, in the creation response, and is readable ' +
+      'nowhere else in the API — losing it means replacing the endpoint. Payloads carry ' +
+      'opaque identifiers and never a customer name, address or phone number, so a mistyped ' +
+      'URL leaks ids rather than a person.',
+  },
   { name: TAGS.analytics, description: 'Aggregations over the appointment table.' },
   {
     name: TAGS.reports,
     description: 'The same rows listed rather than aggregated, plus CSV export.',
+  },
+  {
+    name: TAGS.audit,
+    description:
+      "The workspace's own copy of the trail every mutating service writes to. Read-only, " +
+      'and that is the property worth having: nothing on this surface can amend or delete an ' +
+      'entry, so the record of what happened cannot be edited by whoever it happened to. ' +
+      'Scoped by the query itself rather than by a filter applied afterwards — another ' +
+      "tenant's entries and platform-level entries cannot be named, only missed. Entries " +
+      'carry the actor as a snapshot taken at the time, so a person renaming themselves ' +
+      'later does not rewrite history.',
   },
   {
     name: TAGS.admin,
@@ -252,6 +320,20 @@ const TAG_DESCRIPTIONS: Array<{ name: string; description: string }> = [
       'they expose is workspaces, platform accounts and counts; never customer names, contact ' +
       'details, appointment contents or notes. Running the platform is no reason to read a ' +
       "clinic's patient list, and the shape of these responses is what enforces that.",
+  },
+  {
+    name: TAGS.customerPortal,
+    description:
+      'A customer reading and changing their own bookings, across every workspace that has a ' +
+      'record of them. **Authenticated but not tenant-scoped** — X-Business-Id plays no part ' +
+      'here, because a customer holds no membership to select among; they are a person who ' +
+      "appears in one or more workspaces' address books. Every response is built from the " +
+      'customer records tied to the signed-in account, so this surface returns only rows ' +
+      'belonging to the person asking, and a booking reference belonging to somebody else is ' +
+      'indistinguishable from one that never existed: both answer 404. Cancelling or ' +
+      'rescheduling runs the workspace booking policy exactly as the anonymous manage link ' +
+      'does, so signing in is never a way round a notice period — including for somebody who ' +
+      'happens to be a member of that workspace as well.',
   },
   {
     name: TAGS.publicBooking,
@@ -549,6 +631,15 @@ const MANAGEMENT_ERRORS = [401, 403, 404, 422, 429, 500] as const;
 const MANAGEMENT_WRITE_ERRORS = [401, 403, 404, 409, 422, 429, 500] as const;
 /** Authenticated but not tenant-scoped (workspace creation, /auth/me). */
 const AUTHENTICATED_ERRORS = [401, 422, 429, 500] as const;
+/**
+ * The customer surface. 403 is absent and its absence is the documentation:
+ * there are no permissions to fail here, because there is no membership to
+ * carry them. Something the caller does not own answers 404, exactly as a
+ * cross-tenant record does on the management surface and for the same reason.
+ */
+const PORTAL_ERRORS = [401, 404, 422, 429, 500] as const;
+/** Portal writes add the conflict case: a lost booking race, or nothing linked. */
+const PORTAL_WRITE_ERRORS = [401, 404, 409, 422, 429, 500] as const;
 /** The unauthenticated auth surface. */
 const AUTH_ERRORS = [401, 422, 429, 500] as const;
 /** The unauthenticated public booking surface. */
@@ -963,8 +1054,13 @@ operation({
   path: '/api/v1/workspace/members',
   tag: TAGS.workspace,
   operationId: 'workspace.listMembers',
-  summary: 'List workspace members',
-  description: 'Every membership in the workspace with its role. Requires `members:read`.',
+  summary: 'List workspace members (superseded)',
+  description:
+    'Every membership in the workspace with its role, unfiltered and unpaginated. Requires ' +
+    '`members:read`. Superseded by `GET /api/v1/members`, which answers the same question ' +
+    'with paging, search and filters; new clients should use that one. This path still works ' +
+    'and is unchanged — retiring it is a breaking change and belongs to a release note rather ' +
+    'than to a quiet removal — but it will not gain features.',
   tenant: true,
   responses: ok('`data` is the array of memberships.'),
   errors: MANAGEMENT_ERRORS,
@@ -1292,6 +1388,189 @@ operation({
   body: replaceStaffServicesRequest,
   responses: ok('`data` is the resulting array of service assignments.'),
   errors: MANAGEMENT_WRITE_ERRORS,
+});
+
+// ---------------------------------------------------------------------------
+// Members — the workspace's people, and the two paths that are not tenant-scoped
+//
+// `GET /members/invitations` and `POST /members/accept` spell out
+// `tenant: false` the way the platform-admin operations do. They are mounted
+// above the management router in routes/index.ts because an invitation is
+// addressed to somebody whose membership is INVITED, and tenant resolution
+// accepts only ACTIVE ones — behind that chain both would 404 for exactly the
+// people they exist to serve.
+// ---------------------------------------------------------------------------
+
+const inviteMemberRequest = component('InviteMemberRequest', inviteMemberSchema);
+const updateMemberRequest = component('UpdateMemberRequest', updateMemberSchema);
+const replaceMemberPermissionsRequest = component(
+  'ReplaceMemberPermissionsRequest',
+  replaceMemberPermissionsSchema,
+);
+const acceptInvitationRequest = component('AcceptInvitationRequest', acceptInvitationSchema);
+
+operation({
+  method: 'get',
+  path: '/api/v1/members',
+  tag: TAGS.members,
+  operationId: 'members.list',
+  summary: 'List workspace members',
+  description:
+    'Requires `members:read`. Supersedes `GET /api/v1/workspace/members`, which still answers ' +
+    'but returns an unfiltered, unpaginated array; prefer this one, which adds paging, a ' +
+    'search over name and email, and filters on status and role. `includeRemoved` brings back ' +
+    'soft-deleted memberships so somebody who left can be found and invited again rather than ' +
+    'entered as a stranger.',
+  tenant: true,
+  query: listMembersQuerySchema,
+  responses: page(
+    '`data` is one page of members, each with its `user`, `role`, `staffProfile` or null, and ' +
+      'an `isOwner` flag marking the account in `businesses.owner_user_id`.',
+  ),
+  errors: MANAGEMENT_ERRORS,
+});
+
+operation({
+  method: 'post',
+  path: '/api/v1/members/invite',
+  tag: TAGS.members,
+  operationId: 'members.invite',
+  summary: 'Invite somebody to the workspace',
+  description:
+    'Requires `members:invite`. An invitation names an email address, never a user id: ' +
+    'accepting one would turn this endpoint into an oracle for which accounts exist on the ' +
+    'platform. An address with no account gets one created in the INVITED state together with ' +
+    'a set-password link; an address that already has an account is attached to the workspace ' +
+    'and the account itself is left completely untouched, so an invitation can never rewrite ' +
+    "somebody's name or credentials. The invitation token is emailed, not returned here. A " +
+    'live membership for that address is a 409, and a previously removed one is re-invited ' +
+    'rather than duplicated.',
+  tenant: true,
+  body: inviteMemberRequest,
+  responses: created('`data` is the created membership in the INVITED state.'),
+  errors: MANAGEMENT_WRITE_ERRORS,
+});
+
+operation({
+  method: 'patch',
+  path: '/api/v1/members/{id}',
+  tag: TAGS.members,
+  operationId: 'members.update',
+  summary: "Change a member's role or status",
+  description:
+    'Requires `members:update`. `status` accepts only ACTIVE and SUSPENDED: INVITED is written ' +
+    'by the invitation flow and cleared by acceptance, and REMOVED belongs to the delete ' +
+    'route, so neither is a state an operator sets by hand. Three refusals are worth knowing ' +
+    'about, and all three answer 409: a caller cannot edit their own membership, nobody can ' +
+    "edit the workspace owner's, and the last member holding `roles:manage` cannot be demoted " +
+    'or suspended — that one is the fastest way to lock a workspace out of itself. A role ' +
+    "change takes effect on the affected person's next request; their existing token keeps " +
+    'working and simply carries less authority.',
+  tenant: true,
+  params: memberIdParamsSchema,
+  body: updateMemberRequest,
+  responses: ok('`data` is the updated member.'),
+  errors: MANAGEMENT_WRITE_ERRORS,
+});
+
+operation({
+  method: 'delete',
+  path: '/api/v1/members/{id}',
+  tag: TAGS.members,
+  operationId: 'members.remove',
+  summary: 'Remove a member from the workspace',
+  description:
+    'Requires `members:remove`. A soft delete, so the address can be invited again later and ' +
+    "the person's audit history stays attributable. Their staff profile is retired in the " +
+    'same transaction — leaving it live would keep somebody who has left bookable — and the ' +
+    'removal is refused with a 409 while they still hold upcoming appointments, because ' +
+    'cancelling or reassigning those is a decision somebody has to make rather than a side ' +
+    'effect of tidying up a list. Self-removal, removing the owner and removing the last ' +
+    'member who can manage roles are all refused for the same reasons as PATCH.',
+  tenant: true,
+  params: memberIdParamsSchema,
+  responses: deleted('The membership was removed.'),
+  errors: MANAGEMENT_WRITE_ERRORS,
+});
+
+operation({
+  method: 'get',
+  path: '/api/v1/members/{id}/permissions',
+  tag: TAGS.members,
+  operationId: 'members.permissions',
+  summary: 'Read what one member may do',
+  description:
+    'Requires `members:read`. Answers the question a support conversation actually asks — ' +
+    '"why can they not do this?" — by showing the role grant and the per-member exceptions ' +
+    'separately, alongside the effective set the authorisation middleware will enforce.',
+  tenant: true,
+  params: memberIdParamsSchema,
+  responses: ok(
+    '`data` carries `role`, `rolePermissions`, `overrides` and `effectivePermissions` — role ' +
+      'grants plus GRANTs minus DENYs.',
+  ),
+  errors: MANAGEMENT_ERRORS,
+});
+
+operation({
+  method: 'put',
+  path: '/api/v1/members/{id}/permissions',
+  tag: TAGS.members,
+  operationId: 'members.replacePermissions',
+  summary: "Replace one member's permission exceptions",
+  description:
+    'Requires `roles:manage`, deliberately not the weaker `members:update` a Manager holds: a ' +
+    'Manager may change who does which job, not what a job is allowed to do. A full ' +
+    'replacement rather than a patch — whatever is absent is deleted — because a merge would ' +
+    'make "remove this DENY" impossible to express. Refused on the caller themselves and on ' +
+    'the workspace owner, since a DENY placed there is the quickest lockout in the product.',
+  tenant: true,
+  params: memberIdParamsSchema,
+  body: replaceMemberPermissionsRequest,
+  responses: ok('`data` is the recomputed permission view, in the shape GET returns.'),
+  errors: MANAGEMENT_WRITE_ERRORS,
+});
+
+operation({
+  method: 'get',
+  path: '/api/v1/members/invitations',
+  tag: TAGS.members,
+  operationId: 'members.listInvitations',
+  summary: 'List the invitations addressed to me',
+  description:
+    'Authenticated and **not** tenant-scoped: the caller has been invited somewhere but ' +
+    'belongs nowhere yet, so there is no membership for tenant resolution to find. No ' +
+    'permission is checked either, and none is needed — the only rows this can return are ' +
+    "invitations addressed to the caller's own account. Each one carries a freshly issued " +
+    'token, so a lost invitation email cannot strand somebody.',
+  authenticated: true,
+  tenant: false,
+  responses: ok(
+    '`data` is the array of pending invitations, each with the workspace name and slug, the ' +
+      'role offered, and a token to present to `POST /api/v1/members/accept`.',
+  ),
+  errors: AUTHENTICATED_ERRORS,
+});
+
+operation({
+  method: 'post',
+  path: '/api/v1/members/accept',
+  tag: TAGS.members,
+  operationId: 'members.acceptInvitation',
+  summary: 'Accept an invitation',
+  description:
+    'Authenticated and **not** tenant-scoped, for the reason above. Both halves are required ' +
+    'and neither is sufficient alone: the token says which invitation is being accepted, and ' +
+    'the session proves the caller is the person it was addressed to. Everything that fails ' +
+    'answers the same 404 — a token that is forged, expired, already used, withdrawn, or ' +
+    'addressed to somebody else — so the endpoint cannot be used to probe which memberships ' +
+    'exist. On success the membership becomes ACTIVE, which also closes the token: a replay ' +
+    'finds nothing in the INVITED state to accept.',
+  authenticated: true,
+  tenant: false,
+  body: acceptInvitationRequest,
+  responses: ok('`data` is the now-ACTIVE membership with its workspace and role.'),
+  errors: [401, 404, 422, 429, 500],
 });
 
 // ---------------------------------------------------------------------------
@@ -2356,6 +2635,153 @@ operation({
 });
 
 // ---------------------------------------------------------------------------
+// Webhooks
+// ---------------------------------------------------------------------------
+
+const createWebhookRequest = component('CreateWebhookRequest', createWebhookSchema);
+const updateWebhookRequest = component('UpdateWebhookRequest', updateWebhookSchema);
+
+/**
+ * Repeated on both read operations rather than stated once, because a client
+ * author reads one operation and not the section around it, and the thing they
+ * must not assume is that the secret can be fetched later.
+ */
+const WEBHOOK_ENDPOINT_PAYLOAD =
+  '`data` carries `id`, `url`, `description`, `events`, `isActive`, `failureCount`, ' +
+  '`disabledAt`, `lastSuccessAt`, `lastFailureAt` and timestamps. The signing secret is not ' +
+  'among them and cannot be read back — it is returned only by the creation call.';
+
+operation({
+  method: 'get',
+  path: '/api/v1/webhooks',
+  tag: TAGS.webhooks,
+  operationId: 'webhooks.list',
+  summary: 'List webhook endpoints',
+  description:
+    'Requires `webhooks:read`. `event` narrows to the endpoints that would be notified of one ' +
+    'event, wildcard subscribers included, which is how to answer "who hears about a ' +
+    'cancellation?" without reading every row.',
+  tenant: true,
+  query: listWebhooksQuerySchema,
+  responses: page(
+    '`data` is one page of endpoints, in the shape described on `GET /api/v1/webhooks/{id}` ' +
+      'and without the signing secret.',
+  ),
+  errors: MANAGEMENT_ERRORS,
+});
+
+operation({
+  method: 'post',
+  path: '/api/v1/webhooks',
+  tag: TAGS.webhooks,
+  operationId: 'webhooks.create',
+  summary: 'Register a webhook endpoint',
+  description:
+    'Requires `webhooks:manage`, which the built-in roles grant to owners alone: pointing a ' +
+    "workspace's event stream at an arbitrary host is an owner-level act. **The response is " +
+    'the only place the signing secret ever appears** — it is excluded from every read by the ' +
+    'model default scope, so a client that does not store it now must delete the endpoint and ' +
+    'register another. Omitting `events` subscribes to everything, including events added ' +
+    'later. A workspace is capped at 20 endpoints, because each one is another insert inside ' +
+    'the transaction that takes a booking.',
+  tenant: true,
+  body: createWebhookRequest,
+  responses: created(
+    '`data` is the endpoint plus `signingSecret`, and `meta.secretRetrievable` is false to say ' +
+      'so in the payload rather than only in this document.',
+  ),
+  errors: MANAGEMENT_WRITE_ERRORS,
+});
+
+operation({
+  method: 'get',
+  path: '/api/v1/webhooks/{id}',
+  tag: TAGS.webhooks,
+  operationId: 'webhooks.get',
+  summary: 'Read one webhook endpoint',
+  description: 'Requires `webhooks:read`. Includes the most recent deliveries for triage.',
+  tenant: true,
+  params: webhookIdParamsSchema,
+  responses: ok(`${WEBHOOK_ENDPOINT_PAYLOAD} \`recentDeliveries\` carries the latest attempts.`),
+  errors: MANAGEMENT_ERRORS,
+});
+
+operation({
+  method: 'patch',
+  path: '/api/v1/webhooks/{id}',
+  tag: TAGS.webhooks,
+  operationId: 'webhooks.update',
+  summary: 'Amend a webhook endpoint',
+  description:
+    'Requires `webhooks:manage`. The signing secret is not amendable and is absent from the ' +
+    'body: a caller-supplied secret would be a caller-chosen one, and rotating a secret needs ' +
+    'an overlap window rather than a field on a PATCH. Re-enabling an endpoint the delivery ' +
+    'worker disabled after repeated failures also clears its failure counter, so the next ' +
+    'failure starts the count again rather than tripping the limit immediately.',
+  tenant: true,
+  params: webhookIdParamsSchema,
+  body: updateWebhookRequest,
+  responses: ok(WEBHOOK_ENDPOINT_PAYLOAD),
+  errors: MANAGEMENT_WRITE_ERRORS,
+});
+
+operation({
+  method: 'delete',
+  path: '/api/v1/webhooks/{id}',
+  tag: TAGS.webhooks,
+  operationId: 'webhooks.remove',
+  summary: 'Delete a webhook endpoint',
+  description:
+    'Requires `webhooks:manage`. A soft delete, so the delivery history stays readable and ' +
+    'keeps pointing at a real endpoint: withdrawing a subscription must not erase the record ' +
+    'of what was already sent where. Anything still queued for it is marked CANCELLED by the ' +
+    'worker rather than quietly dropped.',
+  tenant: true,
+  params: webhookIdParamsSchema,
+  responses: deleted('The endpoint was removed and will receive nothing further.'),
+  errors: MANAGEMENT_WRITE_ERRORS,
+});
+
+operation({
+  method: 'post',
+  path: '/api/v1/webhooks/{id}/test',
+  tag: TAGS.webhooks,
+  operationId: 'webhooks.test',
+  summary: 'Send a test event',
+  description:
+    'Requires `webhooks:manage` rather than `webhooks:read`: nothing about the endpoint ' +
+    'changes, but the server opens an outbound connection to a customer-supplied URL, which ' +
+    'is a write to the outside world. The `webhook.test` event is not subscribable, so a ' +
+    "wildcard subscriber is never woken by somebody else's connectivity check. Answers 201 " +
+    'once the delivery is queued — the attempt has not happened yet, and its outcome shows up ' +
+    'in the delivery history like any other event. A disabled endpoint is refused with 409 ' +
+    'rather than accepted: the worker cancels anything addressed to one, so a 201 here would ' +
+    'be the least useful possible answer to "is this endpoint working?".',
+  tenant: true,
+  params: webhookIdParamsSchema,
+  responses: created('`data` is the queued delivery row, initially PENDING.'),
+  errors: MANAGEMENT_WRITE_ERRORS,
+});
+
+operation({
+  method: 'get',
+  path: '/api/v1/webhooks/{id}/deliveries',
+  tag: TAGS.webhooks,
+  operationId: 'webhooks.listDeliveries',
+  summary: 'List delivery attempts',
+  description:
+    'Requires `webhooks:read`. The debugging surface: status, attempt count, the response ' +
+    'code and body the far end returned, and the error text when it did not answer at all. ' +
+    '`eventId` is stable across every endpoint notified of one occurrence, so a single event ' +
+    'can be traced through several subscribers.',
+  tenant: true,
+  params: webhookIdParamsSchema,
+  query: listDeliveriesQuerySchema,
+  responses: page('`data` is one page of delivery attempts, newest first, with their payloads.'),
+  errors: MANAGEMENT_ERRORS,
+});
+
+// ---------------------------------------------------------------------------
 // Analytics
 // ---------------------------------------------------------------------------
 
@@ -2479,6 +2905,98 @@ operation({
       },
     },
   },
+  errors: MANAGEMENT_ERRORS,
+});
+
+// ---------------------------------------------------------------------------
+// Audit — /api/v1/audit-logs
+//
+// Not a variant of /api/v1/admin/audit-logs, and the difference is the whole
+// design: that surface reads across tenants for an operator who holds no
+// membership, so a workspace id is ordinary input over there. Here the
+// workspace comes from the membership and no parameter below can widen it.
+// ---------------------------------------------------------------------------
+
+const AUDIT_ENTRY_FIELDS =
+  '`actorType`, `actorUserId`, `actorCustomerId`, `actorLabel`, `action`, `entityType`, ' +
+  '`entityId`, `requestId`, `ipAddress`, `createdAt` and `metadata`';
+
+const AUDIT_ENTRY_NOTE =
+  '`actorLabel` is the snapshot taken when the entry was written, so an account renamed or ' +
+  'deleted afterwards does not rewrite what the trail says happened, and nothing here is ' +
+  'resolved through a join for the same reason. `businessId` is not among the fields: every ' +
+  "row this surface can return is the caller's own, and echoing the id back would imply the " +
+  'feed could ever hold anything else.';
+
+operation({
+  method: 'get',
+  path: '/api/v1/audit-logs',
+  tag: TAGS.audit,
+  operationId: 'audit.list',
+  summary: 'Read the workspace audit trail',
+  description:
+    'Requires `audit:read`. Newest first, filterable by `action`, `entityType`, `entityId`, ' +
+    '`actorUserId`, a date range and a free-text `search` over the actor, the verb and the ' +
+    'entity type. `from` and `to` are calendar dates cut into whole days on the *workspace* ' +
+    'clock rather than in UTC — a tenant asking what happened on 3 March means their 3 March ' +
+    '— and the zone used is reported back as `meta.timezone` so a client can label its date ' +
+    'pickers honestly.',
+  tenant: true,
+  query: listAuditEntriesQuerySchema,
+  responses: page(
+    `\`data\` is one page of entries, each carrying ${AUDIT_ENTRY_FIELDS}. ${AUDIT_ENTRY_NOTE}`,
+  ),
+  errors: MANAGEMENT_ERRORS,
+});
+
+operation({
+  method: 'get',
+  path: '/api/v1/audit-logs/export.csv',
+  tag: TAGS.audit,
+  operationId: 'audit.export',
+  summary: 'Export the audit trail as CSV',
+  description:
+    'Requires `audit:read` **and** `reports:export`, on the same reading as the appointment ' +
+    'export: taking a copy out of the product is a separate act from reading it on screen. ' +
+    'Takes the same filters as the list and no pagination — it is bounded by a hard row cap ' +
+    'instead, because a page number would only produce a truncated file that looks complete. ' +
+    'The response carries `X-Report-Row-Limit`, `X-Report-Matched-Rows` and ' +
+    '`X-Report-Truncated`, plus `Cache-Control: no-store`, since the file names people, ' +
+    'addresses and what they did. The export writes an audit entry of its own before the ' +
+    'first byte: an owner taking the trail out of the product is exactly the event the trail ' +
+    'exists to record.',
+  tenant: true,
+  query: exportAuditEntriesQuerySchema,
+  responses: {
+    '200': {
+      description: 'The trail as a CSV document.',
+      content: {
+        'text/csv': {
+          schema: z.string().openapi({ description: 'CSV, UTF-8, one audit entry per row.' }),
+        },
+      },
+    },
+  },
+  errors: MANAGEMENT_ERRORS,
+});
+
+operation({
+  method: 'get',
+  path: '/api/v1/audit-logs/{id}',
+  tag: TAGS.audit,
+  operationId: 'audit.get',
+  summary: 'Read one audit entry',
+  description:
+    'Requires `audit:read`. An entry belonging to another workspace, or a platform-level entry ' +
+    'with no workspace at all, answers 404 rather than 403 — the id is matched against the ' +
+    "caller's own workspace in the same statement, so a foreign id simply finds no row. Adds " +
+    '`userAgent` to the list shape: it is repetitive twenty rows at a time and exactly what an ' +
+    'investigation into one entry wants.',
+  tenant: true,
+  params: auditEntryIdParamsSchema,
+  responses: ok(
+    `\`data\` is the entry, carrying ${AUDIT_ENTRY_FIELDS} plus \`userAgent\`. ` + AUDIT_ENTRY_NOTE,
+  ),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -2712,6 +3230,176 @@ operation({
 });
 
 // ---------------------------------------------------------------------------
+// Customer portal — /api/v1/me, authenticated but not tenant-scoped
+//
+// Every operation below spells out `authenticated: true` and `tenant: false`,
+// as the platform-admin ones do and for the mirror-image reason: an operator
+// stands above every workspace, a customer outside all of them, and neither has
+// a membership for `requireTenant` to resolve. Saying so on each operation
+// beats leaving a reader to infer it from an absent header.
+//
+// No operation here takes a workspace, customer or appointment id in any form.
+// Bookings are addressed by the same opaque apt_ handle the confirmation email
+// carries, and the scope is the caller's own customer records — resolved from
+// the access token, never from anything the client sent.
+// ---------------------------------------------------------------------------
+
+const cancelBookingRequest = component('PortalCancelBookingRequest', cancelBookingSchema);
+const rescheduleBookingRequest = component(
+  'PortalRescheduleBookingRequest',
+  rescheduleBookingSchema,
+);
+const updatePreferencesRequest = component('UpdatePreferencesRequest', updatePreferencesSchema);
+
+operation({
+  method: 'get',
+  path: '/api/v1/me/profile',
+  tag: TAGS.customerPortal,
+  operationId: 'portal.profile',
+  summary: 'Read my profile and the workspaces that know me',
+  description:
+    'Authenticated, not tenant-scoped, and no permission is checked — there is no membership ' +
+    'to carry one. Reading this also reconciles the account with any address-book record that ' +
+    'shares its email and is not yet linked, but **only once the address has been verified**: ' +
+    'registration accepts any address, so linking on a bare email match would be an ' +
+    'account-takeover primitive. Past that gate the link grants nothing new, since every one ' +
+    'of those bookings already had its manage link delivered to that mailbox.',
+  authenticated: true,
+  tenant: false,
+  responses: ok(
+    '`data` carries `user`, `upcomingBookings` across every workspace, and `workspaces` — one ' +
+      'entry per business that holds a record of this person, with its name, logo, timezone ' +
+      'and support contacts. Workspaces are identified by the `cus_` handle of the record, ' +
+      'never by an internal id.',
+  ),
+  errors: PORTAL_ERRORS,
+});
+
+operation({
+  method: 'get',
+  path: '/api/v1/me/bookings',
+  tag: TAGS.customerPortal,
+  operationId: 'portal.listBookings',
+  summary: 'List my bookings',
+  description:
+    'Every workspace at once, which is the point: a person does not think of their diary one ' +
+    'business at a time. `when` names the intent — UPCOMING sorts soonest first, PAST sorts ' +
+    'most recent first — so a dashboard does not have to send a sort order it would get wrong ' +
+    'half the time. Rows are the summary shape: enough to render a card and decide what to ' +
+    'open, with `internalNotes` and the rest of the staff-facing detail deliberately absent.',
+  authenticated: true,
+  tenant: false,
+  query: listBookingsQuerySchema,
+  responses: page(
+    '`data` is one page of bookings, each with its business, service, staff and location ' +
+      'summaries and the times in the workspace timezone.',
+  ),
+  errors: PORTAL_ERRORS,
+});
+
+operation({
+  method: 'get',
+  path: '/api/v1/me/bookings/{publicId}',
+  tag: TAGS.customerPortal,
+  operationId: 'portal.getBooking',
+  summary: 'Read one of my bookings',
+  description:
+    'The same projection the anonymous manage link serves, reused rather than reimplemented so ' +
+    'the two surfaces cannot drift on what a customer may see. Ownership is part of the query ' +
+    'rather than a check applied to its result: a handle belonging to somebody else and a ' +
+    'handle that never existed are the same 404.',
+  authenticated: true,
+  tenant: false,
+  params: bookingPublicIdParamsSchema,
+  responses: ok('`data` is the booking as the customer-facing projection describes it.'),
+  errors: PORTAL_ERRORS,
+});
+
+operation({
+  method: 'post',
+  path: '/api/v1/me/bookings/{publicId}/cancel',
+  tag: TAGS.customerPortal,
+  operationId: 'portal.cancelBooking',
+  summary: 'Cancel one of my bookings',
+  description:
+    "Runs the workspace's own cancellation policy — the same code path, and the same notice " +
+    'deadline, as the anonymous manage link. Being signed in makes the cancellation ' +
+    'attributable, not free: a 422 inside the deadline is the business rule answering, and it ' +
+    'answers for a caller who happens to be a member of that workspace too, so this surface ' +
+    'cannot become a policy bypass. The status history records a CUSTOMER actor and the audit ' +
+    'entry names the user account, which is the one thing an anonymous manage link can never ' +
+    'record.',
+  authenticated: true,
+  tenant: false,
+  params: bookingPublicIdParamsSchema,
+  body: cancelBookingRequest,
+  responses: ok('`data` is the cancelled booking.'),
+  errors: PORTAL_WRITE_ERRORS,
+});
+
+operation({
+  method: 'post',
+  path: '/api/v1/me/bookings/{publicId}/reschedule',
+  tag: TAGS.customerPortal,
+  operationId: 'portal.rescheduleBooking',
+  summary: 'Move one of my bookings',
+  description:
+    'Only the new instant is accepted. Provider and location are deliberately refused, as they ' +
+    'are on the anonymous surface: the appointment already names both, and letting the ' +
+    'customer reassign them would turn a reschedule into a way to book any provider in the ' +
+    'workspace, outside whatever the booking link publishes. The reschedule deadline, the ' +
+    'notice period and the availability check all apply, and a slot lost to a race answers 409.',
+  authenticated: true,
+  tenant: false,
+  params: bookingPublicIdParamsSchema,
+  body: rescheduleBookingRequest,
+  responses: ok('`data` is the booking at its new time.'),
+  errors: PORTAL_WRITE_ERRORS,
+});
+
+operation({
+  method: 'get',
+  path: '/api/v1/me/preferences',
+  tag: TAGS.customerPortal,
+  operationId: 'portal.getPreferences',
+  summary: 'Read my contact preferences',
+  description:
+    'Folded across every workspace that holds a record of this person, because there is no ' +
+    'workspace to pick between — naming one would mean accepting the identifier this surface ' +
+    'must never take. When the linked records disagree, which they can because staff edit the ' +
+    'same column from the address book, the reported value is the conservative reading and ' +
+    '`divergent` is true, so a client can say "varies" rather than presenting one ' +
+    "workspace's answer as though it were universal.",
+  authenticated: true,
+  tenant: false,
+  responses: ok(
+    '`data` carries `preferences` (`emailEnabled`, `smsEnabled`, `marketingOptIn`, ' +
+      '`reminderOffsetsMinutes`), `divergent` and `workspaceCount`.',
+  ),
+  errors: PORTAL_ERRORS,
+});
+
+operation({
+  method: 'patch',
+  path: '/api/v1/me/preferences',
+  tag: TAGS.customerPortal,
+  operationId: 'portal.updatePreferences',
+  summary: 'Change my contact preferences',
+  description:
+    'Applied to every linked record in one transaction, with an audit entry written per ' +
+    'workspace so each business can see the change in its own trail. Merged over what is ' +
+    'stored rather than replacing it, and no field has a default — a default would quietly ' +
+    'reset the switches the person left alone. `reminderOffsetsMinutes: null` hands the ' +
+    "schedule back to each workspace's own reminder policy. A patch from somebody with no " +
+    'linked records answers 409 rather than a 200 that stored nothing.',
+  authenticated: true,
+  tenant: false,
+  body: updatePreferencesRequest,
+  responses: ok('`data` is the preference view, in the shape GET returns.'),
+  errors: PORTAL_WRITE_ERRORS,
+});
+
+// ---------------------------------------------------------------------------
 // Public booking — /api/v1/public, unauthenticated
 // ---------------------------------------------------------------------------
 
@@ -2850,7 +3538,7 @@ MeetFlow is a multi-tenant scheduling API. Every path below is transcribed from 
 every request schema is imported from the module that validates it at runtime — so this document
 cannot describe an endpoint the server does not serve, or a payload it would not accept.
 
-### Three surfaces
+### Four surfaces
 
 **\`/api/v1/*\` — authenticated management.** Mounted behind \`authenticate → rate limit →
 requireTenant\`, applied at the router rather than per route so a new endpoint cannot ship
@@ -2868,6 +3556,14 @@ requirePlatformAdmin\` and deliberately **not** behind \`requireTenant\`: an ope
 membership in the workspaces they administer, so tenant resolution would refuse every call. It is
 the only surface that reads across tenants, and what it reads is workspaces, platform accounts and
 counts — never a workspace's customers, appointments or notes.
+
+**\`/api/v1/me/*\` — the customer.** Authenticated and, for the mirror-image reason, also **not**
+behind \`requireTenant\`: a customer is a person who appears in one or more workspaces' address
+books and holds no membership at all, so tenant resolution would refuse every call. Its scope is
+the customer records tied to the signed-in account, so it returns only rows belonging to the
+person asking. Two further paths sit outside tenant resolution for the same class of reason and
+say so on the operation: \`POST /api/v1/workspaces\` (no workspace yet) and
+\`POST /api/v1/members/accept\` (a membership that is INVITED rather than ACTIVE).
 
 ### Choosing a workspace
 

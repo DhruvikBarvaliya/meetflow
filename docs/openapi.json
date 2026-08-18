@@ -3,7 +3,7 @@
   "info": {
     "title": "MeetFlow API",
     "version": "1.0.0",
-    "description": "MeetFlow is a multi-tenant scheduling API. Every path below is transcribed from the router, and\nevery request schema is imported from the module that validates it at runtime — so this document\ncannot describe an endpoint the server does not serve, or a payload it would not accept.\n\n### Three surfaces\n\n**`/api/v1/*` — authenticated management.** Mounted behind `authenticate → rate limit →\nrequireTenant`, applied at the router rather than per route so a new endpoint cannot ship\nunauthenticated. One consequence is intentional: an unauthenticated request to an unknown path\nunder `/api/v1` answers **401, not 404**, so the surface cannot be probed to discover which\nendpoints exist.\n\n**`/api/v1/public/*` — unauthenticated booking.** Tenant context comes from a validated\nbooking-link slug, IP rate limits are tight, and only opaque public identifiers are ever exposed.\nAn unknown path here answers 404 rather than falling through into the authenticated chain and\nanswering a misleading 401.\n\n**`/api/v1/admin/*` — platform administration.** Mounted behind `authenticate → rate limit →\nrequirePlatformAdmin` and deliberately **not** behind `requireTenant`: an operator holds no\nmembership in the workspaces they administer, so tenant resolution would refuse every call. It is\nthe only surface that reads across tenants, and what it reads is workspaces, platform accounts and\ncounts — never a workspace's customers, appointments or notes.\n\n### Choosing a workspace\n\nThe tenant a request operates on is derived from an ACTIVE membership row, never from client\ninput. `X-Business-Id` only *selects* among workspaces the authenticated user already belongs\nto; an id for one they do not resolves to nothing and the request is refused with 404, not 403.\n`GET /api/v1/auth/me` lists the memberships a client may choose from.\n\n### Envelopes\n\nSuccess is `{ \"data\": …, \"meta\"?: … }`; failure is\n`{ \"error\": { \"code\", \"message\", \"details\"?, \"requestId\" } }`. `error.code` is a stable\nmachine code and safe to switch on; `requestId` is echoed in `X-Request-Id` and is the handle\nthat reaches the server-side detail.\n\n### Times\n\nAny field naming a moment must carry its offset (`Z` or `+05:30`); a bare local string would\nbe read in whichever zone the server happens to run in. Any field naming a zone must be an IANA\nidentifier such as `Asia/Kolkata` — a fixed offset cannot express DST and would misplace every\nslot twice a year. Calendar dates are `YYYY-MM-DD` and wall-clock times are `HH:mm`.\n\n### Strictness\n\nEvery request body and query string is `.strict()`: an unrecognised key is a 422, never a\nsilently ignored field. That is deliberate — a stray `businessId` must be a loud rejection\nrather than an attempt to write into another tenant that a later refactor might start honouring.",
+    "description": "MeetFlow is a multi-tenant scheduling API. Every path below is transcribed from the router, and\nevery request schema is imported from the module that validates it at runtime — so this document\ncannot describe an endpoint the server does not serve, or a payload it would not accept.\n\n### Four surfaces\n\n**`/api/v1/*` — authenticated management.** Mounted behind `authenticate → rate limit →\nrequireTenant`, applied at the router rather than per route so a new endpoint cannot ship\nunauthenticated. One consequence is intentional: an unauthenticated request to an unknown path\nunder `/api/v1` answers **401, not 404**, so the surface cannot be probed to discover which\nendpoints exist.\n\n**`/api/v1/public/*` — unauthenticated booking.** Tenant context comes from a validated\nbooking-link slug, IP rate limits are tight, and only opaque public identifiers are ever exposed.\nAn unknown path here answers 404 rather than falling through into the authenticated chain and\nanswering a misleading 401.\n\n**`/api/v1/admin/*` — platform administration.** Mounted behind `authenticate → rate limit →\nrequirePlatformAdmin` and deliberately **not** behind `requireTenant`: an operator holds no\nmembership in the workspaces they administer, so tenant resolution would refuse every call. It is\nthe only surface that reads across tenants, and what it reads is workspaces, platform accounts and\ncounts — never a workspace's customers, appointments or notes.\n\n**`/api/v1/me/*` — the customer.** Authenticated and, for the mirror-image reason, also **not**\nbehind `requireTenant`: a customer is a person who appears in one or more workspaces' address\nbooks and holds no membership at all, so tenant resolution would refuse every call. Its scope is\nthe customer records tied to the signed-in account, so it returns only rows belonging to the\nperson asking. Two further paths sit outside tenant resolution for the same class of reason and\nsay so on the operation: `POST /api/v1/workspaces` (no workspace yet) and\n`POST /api/v1/members/accept` (a membership that is INVITED rather than ACTIVE).\n\n### Choosing a workspace\n\nThe tenant a request operates on is derived from an ACTIVE membership row, never from client\ninput. `X-Business-Id` only *selects* among workspaces the authenticated user already belongs\nto; an id for one they do not resolves to nothing and the request is refused with 404, not 403.\n`GET /api/v1/auth/me` lists the memberships a client may choose from.\n\n### Envelopes\n\nSuccess is `{ \"data\": …, \"meta\"?: … }`; failure is\n`{ \"error\": { \"code\", \"message\", \"details\"?, \"requestId\" } }`. `error.code` is a stable\nmachine code and safe to switch on; `requestId` is echoed in `X-Request-Id` and is the handle\nthat reaches the server-side detail.\n\n### Times\n\nAny field naming a moment must carry its offset (`Z` or `+05:30`); a bare local string would\nbe read in whichever zone the server happens to run in. Any field naming a zone must be an IANA\nidentifier such as `Asia/Kolkata` — a fixed offset cannot express DST and would misplace every\nslot twice a year. Calendar dates are `YYYY-MM-DD` and wall-clock times are `HH:mm`.\n\n### Strictness\n\nEvery request body and query string is `.strict()`: an unrecognised key is a 422, never a\nsilently ignored field. That is deliberate — a stray `businessId` must be a loud rejection\nrather than an attempt to write into another tenant that a later refactor might start honouring.",
     "license": {
       "name": "UNLICENSED"
     }
@@ -40,6 +40,10 @@
       "description": "Bookable provider profiles and the services they deliver."
     },
     {
+      "name": "Members",
+      "description": "Who belongs to the workspace, what each of them may do, and how somebody joins or leaves. This is the surface that hands out authority, so what it guarantees is what cannot happen: the last account able to manage roles cannot be demoted, suspended or removed, nobody may edit their own membership or the owners, and a member still holding upcoming appointments cannot be removed out from under them. A role change lands on the next request the affected person makes — effective permissions are read from the membership on every call rather than baked into a token — so a mistake is undone as fast as it was made, and revoking access does not wait for a session to expire. Two paths here are authenticated but not tenant-scoped, and say so."
+    },
+    {
       "name": "Services",
       "description": "The service catalogue and its categories."
     },
@@ -68,6 +72,10 @@
       "description": "Customers waiting for a slot, and converting them into one."
     },
     {
+      "name": "Webhooks",
+      "description": "Outbound event delivery: where a workspace wants to be told when its diary changes. Registering an endpoint points a workspace's event stream at a server of the registrant's choosing, which is a materially larger act than reading delivery history, so the built-in roles grant the two separately and only an owner may register one. The signing secret is returned exactly once, in the creation response, and is readable nowhere else in the API — losing it means replacing the endpoint. Payloads carry opaque identifiers and never a customer name, address or phone number, so a mistyped URL leaks ids rather than a person."
+    },
+    {
       "name": "Analytics",
       "description": "Aggregations over the appointment table."
     },
@@ -76,8 +84,16 @@
       "description": "The same rows listed rather than aggregated, plus CSV export."
     },
     {
+      "name": "Audit",
+      "description": "The workspace's own copy of the trail every mutating service writes to. Read-only, and that is the property worth having: nothing on this surface can amend or delete an entry, so the record of what happened cannot be edited by whoever it happened to. Scoped by the query itself rather than by a filter applied afterwards — another tenant's entries and platform-level entries cannot be named, only missed. Entries carry the actor as a snapshot taken at the time, so a person renaming themselves later does not rewrite history."
+    },
+    {
       "name": "Platform Admin",
       "description": "Operating the platform itself, and the only endpoints that read across tenants. They require `platformRole = ADMIN` and are not tenant-scoped — X-Business-Id plays no part here, because an operator holds no membership in the workspaces they administer. What they expose is workspaces, platform accounts and counts; never customer names, contact details, appointment contents or notes. Running the platform is no reason to read a clinic's patient list, and the shape of these responses is what enforces that."
+    },
+    {
+      "name": "Customer Portal",
+      "description": "A customer reading and changing their own bookings, across every workspace that has a record of them. **Authenticated but not tenant-scoped** — X-Business-Id plays no part here, because a customer holds no membership to select among; they are a person who appears in one or more workspaces' address books. Every response is built from the customer records tied to the signed-in account, so this surface returns only rows belonging to the person asking, and a booking reference belonging to somebody else is indistinguishable from one that never existed: both answer 404. Cancelling or rescheduling runs the workspace booking policy exactly as the anonymous manage link does, so signing in is never a way round a notice period — including for somebody who happens to be a member of that workspace as well."
     },
     {
       "name": "Public Booking",
@@ -1222,6 +1238,155 @@
         },
         "required": [
           "serviceIds"
+        ],
+        "additionalProperties": false
+      },
+      "InviteMemberRequest": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "maxLength": 255,
+            "format": "email"
+          },
+          "roleId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "firstName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          },
+          "lastName": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 100
+          }
+        },
+        "required": [
+          "email",
+          "roleId"
+        ],
+        "additionalProperties": false
+      },
+      "UpdateMemberRequest": {
+        "type": "object",
+        "properties": {
+          "roleId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "ACTIVE",
+              "SUSPENDED"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReplaceMemberPermissionsRequest": {
+        "type": "object",
+        "properties": {
+          "overrides": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "permission": {
+                  "type": "string",
+                  "enum": [
+                    "workspace:read",
+                    "workspace:update",
+                    "workspace:delete",
+                    "workspace:settings:manage",
+                    "members:read",
+                    "members:invite",
+                    "members:update",
+                    "members:remove",
+                    "roles:read",
+                    "roles:manage",
+                    "locations:read",
+                    "locations:manage",
+                    "teams:read",
+                    "teams:manage",
+                    "staff:read",
+                    "staff:manage",
+                    "services:read",
+                    "services:manage",
+                    "resources:read",
+                    "resources:manage",
+                    "availability:read",
+                    "availability:manage",
+                    "availability:manage:own",
+                    "holidays:manage",
+                    "blackouts:manage",
+                    "customers:read",
+                    "customers:manage",
+                    "customers:notes:manage",
+                    "customers:read:assigned",
+                    "appointments:read",
+                    "appointments:read:own",
+                    "appointments:create",
+                    "appointments:update",
+                    "appointments:reschedule",
+                    "appointments:cancel",
+                    "appointments:complete",
+                    "appointments:no_show",
+                    "appointments:approve",
+                    "appointments:notes:manage",
+                    "booking_links:read",
+                    "booking_links:manage",
+                    "waitlist:read",
+                    "waitlist:manage",
+                    "notifications:read",
+                    "notifications:manage",
+                    "templates:manage",
+                    "automations:read",
+                    "automations:manage",
+                    "analytics:read",
+                    "reports:read",
+                    "reports:export",
+                    "audit:read",
+                    "webhooks:read",
+                    "webhooks:manage"
+                  ]
+                },
+                "effect": {
+                  "type": "string",
+                  "enum": [
+                    "GRANT",
+                    "DENY"
+                  ]
+                }
+              },
+              "required": [
+                "permission",
+                "effect"
+              ],
+              "additionalProperties": false
+            },
+            "maxItems": 54
+          }
+        },
+        "required": [
+          "overrides"
+        ],
+        "additionalProperties": false
+      },
+      "AcceptInvitationRequest": {
+        "type": "object",
+        "properties": {
+          "token": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        },
+        "required": [
+          "token"
         ],
         "additionalProperties": false
       },
@@ -2800,6 +2965,81 @@
         ],
         "additionalProperties": false
       },
+      "CreateWebhookRequest": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "format": "uri"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 500
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "*",
+                "appointment.created",
+                "appointment.rescheduled",
+                "appointment.cancelled",
+                "appointment.completed",
+                "appointment.no_show"
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 6
+          },
+          "isActive": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "additionalProperties": false
+      },
+      "UpdateWebhookRequest": {
+        "type": "object",
+        "properties": {
+          "url": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2048,
+            "format": "uri"
+          },
+          "description": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 500
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "*",
+                "appointment.created",
+                "appointment.rescheduled",
+                "appointment.cancelled",
+                "appointment.completed",
+                "appointment.no_show"
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 6
+          },
+          "isActive": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
       "UpdateWorkspaceStatusRequest": {
         "type": "object",
         "properties": {
@@ -2853,6 +3093,61 @@
         "required": [
           "platformRole"
         ],
+        "additionalProperties": false
+      },
+      "PortalCancelBookingRequest": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 500
+          }
+        },
+        "additionalProperties": false
+      },
+      "PortalRescheduleBookingRequest": {
+        "type": "object",
+        "properties": {
+          "startsAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "reason": {
+            "type": "string",
+            "nullable": true,
+            "maxLength": 500
+          }
+        },
+        "required": [
+          "startsAt"
+        ],
+        "additionalProperties": false
+      },
+      "UpdatePreferencesRequest": {
+        "type": "object",
+        "properties": {
+          "emailEnabled": {
+            "type": "boolean"
+          },
+          "smsEnabled": {
+            "type": "boolean"
+          },
+          "marketingOptIn": {
+            "type": "boolean"
+          },
+          "reminderOffsetsMinutes": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "integer",
+              "minimum": 0,
+              "exclusiveMinimum": true,
+              "maximum": 43200
+            },
+            "maxItems": 10
+          }
+        },
         "additionalProperties": false
       },
       "CreatePublicBookingRequest": {
@@ -4355,8 +4650,8 @@
           "Workspace"
         ],
         "operationId": "workspace.listMembers",
-        "summary": "List workspace members",
-        "description": "Every membership in the workspace with its role. Requires `members:read`.",
+        "summary": "List workspace members (superseded)",
+        "description": "Every membership in the workspace with its role, unfiltered and unpaginated. Requires `members:read`. Superseded by `GET /api/v1/members`, which answers the same question with paging, search and filters; new clients should use that one. This path still works and is unchanged — retiring it is a breaking change and belongs to a release note rather than to a quiet removal — but it will not gain features.",
         "security": [
           {
             "bearerAuth": []
@@ -6795,6 +7090,873 @@
           },
           "409": {
             "description": "The request conflicts with stored state: a duplicate, a booking race lost at the database exclusion constraint, or a status transition the lifecycle forbids.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/members": {
+      "get": {
+        "tags": [
+          "Members"
+        ],
+        "operationId": "members.list",
+        "summary": "List workspace members",
+        "description": "Requires `members:read`. Supersedes `GET /api/v1/workspace/members`, which still answers but returns an unfiltered, unpaginated array; prefer this one, which adds paging, a search over name and email, and filters on status and role. `includeRemoved` brings back soft-deleted memberships so somebody who left can be found and invited again rather than entered as a stranger.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            },
+            "required": false,
+            "name": "page",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            },
+            "required": false,
+            "name": "pageSize",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 160
+            },
+            "required": false,
+            "name": "search",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "ACTIVE",
+                "INVITED",
+                "SUSPENDED"
+              ]
+            },
+            "required": false,
+            "name": "status",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "roleId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "default": "false"
+            },
+            "required": false,
+            "name": "includeRemoved",
+            "in": "query"
+          },
+          {
+            "$ref": "#/components/parameters/XBusinessId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`data` is one page of members, each with its `user`, `role`, `staffProfile` or null, and an `isOwner` flag marking the account in `businesses.owner_user_id`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/members/invite": {
+      "post": {
+        "tags": [
+          "Members"
+        ],
+        "operationId": "members.invite",
+        "summary": "Invite somebody to the workspace",
+        "description": "Requires `members:invite`. An invitation names an email address, never a user id: accepting one would turn this endpoint into an oracle for which accounts exist on the platform. An address with no account gets one created in the INVITED state together with a set-password link; an address that already has an account is attached to the workspace and the account itself is left completely untouched, so an invitation can never rewrite somebody's name or credentials. The invitation token is emailed, not returned here. A live membership for that address is a 409, and a previously removed one is re-invited rather than duplicated.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/XBusinessId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InviteMemberRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "`data` is the created membership in the INVITED state.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with stored state: a duplicate, a booking race lost at the database exclusion constraint, or a status transition the lifecycle forbids.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/members/{id}": {
+      "patch": {
+        "tags": [
+          "Members"
+        ],
+        "operationId": "members.update",
+        "summary": "Change a member's role or status",
+        "description": "Requires `members:update`. `status` accepts only ACTIVE and SUSPENDED: INVITED is written by the invitation flow and cleared by acceptance, and REMOVED belongs to the delete route, so neither is a state an operator sets by hand. Three refusals are worth knowing about, and all three answer 409: a caller cannot edit their own membership, nobody can edit the workspace owner's, and the last member holding `roles:manage` cannot be demoted or suspended — that one is the fastest way to lock a workspace out of itself. A role change takes effect on the affected person's next request; their existing token keeps working and simply carries less authority.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "$ref": "#/components/parameters/XBusinessId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMemberRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the updated member.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with stored state: a duplicate, a booking race lost at the database exclusion constraint, or a status transition the lifecycle forbids.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Members"
+        ],
+        "operationId": "members.remove",
+        "summary": "Remove a member from the workspace",
+        "description": "Requires `members:remove`. A soft delete, so the address can be invited again later and the person's audit history stays attributable. Their staff profile is retired in the same transaction — leaving it live would keep somebody who has left bookable — and the removal is refused with a 409 while they still hold upcoming appointments, because cancelling or reassigning those is a decision somebody has to make rather than a side effect of tidying up a list. Self-removal, removing the owner and removing the last member who can manage roles are all refused for the same reasons as PATCH.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "$ref": "#/components/parameters/XBusinessId"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The membership was removed."
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with stored state: a duplicate, a booking race lost at the database exclusion constraint, or a status transition the lifecycle forbids.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/members/{id}/permissions": {
+      "get": {
+        "tags": [
+          "Members"
+        ],
+        "operationId": "members.permissions",
+        "summary": "Read what one member may do",
+        "description": "Requires `members:read`. Answers the question a support conversation actually asks — \"why can they not do this?\" — by showing the role grant and the per-member exceptions separately, alongside the effective set the authorisation middleware will enforce.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "$ref": "#/components/parameters/XBusinessId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`data` carries `role`, `rolePermissions`, `overrides` and `effectivePermissions` — role grants plus GRANTs minus DENYs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Members"
+        ],
+        "operationId": "members.replacePermissions",
+        "summary": "Replace one member's permission exceptions",
+        "description": "Requires `roles:manage`, deliberately not the weaker `members:update` a Manager holds: a Manager may change who does which job, not what a job is allowed to do. A full replacement rather than a patch — whatever is absent is deleted — because a merge would make \"remove this DENY\" impossible to express. Refused on the caller themselves and on the workspace owner, since a DENY placed there is the quickest lockout in the product.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "$ref": "#/components/parameters/XBusinessId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplaceMemberPermissionsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the recomputed permission view, in the shape GET returns.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with stored state: a duplicate, a booking race lost at the database exclusion constraint, or a status transition the lifecycle forbids.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/members/invitations": {
+      "get": {
+        "tags": [
+          "Members"
+        ],
+        "operationId": "members.listInvitations",
+        "summary": "List the invitations addressed to me",
+        "description": "Authenticated and **not** tenant-scoped: the caller has been invited somewhere but belongs nowhere yet, so there is no membership for tenant resolution to find. No permission is checked either, and none is needed — the only rows this can return are invitations addressed to the caller's own account. Each one carries a freshly issued token, so a lost invitation email cannot strand somebody.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`data` is the array of pending invitations, each with the workspace name and slug, the role offered, and a token to present to `POST /api/v1/members/accept`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/members/accept": {
+      "post": {
+        "tags": [
+          "Members"
+        ],
+        "operationId": "members.acceptInvitation",
+        "summary": "Accept an invitation",
+        "description": "Authenticated and **not** tenant-scoped, for the reason above. Both halves are required and neither is sufficient alone: the token says which invitation is being accepted, and the session proves the caller is the person it was addressed to. Everything that fails answers the same 404 — a token that is forged, expired, already used, withdrawn, or addressed to somebody else — so the endpoint cannot be used to probe which memberships exist. On success the membership becomes ACTIVE, which also closes the token: a replay finds nothing in the INVITED state to accept.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptInvitationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the now-ACTIVE membership with its workspace and role.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
             "content": {
               "application/json": {
                 "schema": {
@@ -14490,6 +15652,837 @@
         }
       }
     },
+    "/api/v1/webhooks": {
+      "get": {
+        "tags": [
+          "Webhooks"
+        ],
+        "operationId": "webhooks.list",
+        "summary": "List webhook endpoints",
+        "description": "Requires `webhooks:read`. `event` narrows to the endpoints that would be notified of one event, wildcard subscribers included, which is how to answer \"who hears about a cancellation?\" without reading every row.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            },
+            "required": false,
+            "name": "page",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            },
+            "required": false,
+            "name": "pageSize",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            },
+            "required": false,
+            "name": "isActive",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "*",
+                "appointment.created",
+                "appointment.rescheduled",
+                "appointment.cancelled",
+                "appointment.completed",
+                "appointment.no_show"
+              ]
+            },
+            "required": false,
+            "name": "event",
+            "in": "query"
+          },
+          {
+            "$ref": "#/components/parameters/XBusinessId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`data` is one page of endpoints, in the shape described on `GET /api/v1/webhooks/{id}` and without the signing secret.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Webhooks"
+        ],
+        "operationId": "webhooks.create",
+        "summary": "Register a webhook endpoint",
+        "description": "Requires `webhooks:manage`, which the built-in roles grant to owners alone: pointing a workspace's event stream at an arbitrary host is an owner-level act. **The response is the only place the signing secret ever appears** — it is excluded from every read by the model default scope, so a client that does not store it now must delete the endpoint and register another. Omitting `events` subscribes to everything, including events added later. A workspace is capped at 20 endpoints, because each one is another insert inside the transaction that takes a booking.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/XBusinessId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateWebhookRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "`data` is the endpoint plus `signingSecret`, and `meta.secretRetrievable` is false to say so in the payload rather than only in this document.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with stored state: a duplicate, a booking race lost at the database exclusion constraint, or a status transition the lifecycle forbids.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/webhooks/{id}": {
+      "get": {
+        "tags": [
+          "Webhooks"
+        ],
+        "operationId": "webhooks.get",
+        "summary": "Read one webhook endpoint",
+        "description": "Requires `webhooks:read`. Includes the most recent deliveries for triage.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "$ref": "#/components/parameters/XBusinessId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`data` carries `id`, `url`, `description`, `events`, `isActive`, `failureCount`, `disabledAt`, `lastSuccessAt`, `lastFailureAt` and timestamps. The signing secret is not among them and cannot be read back — it is returned only by the creation call. `recentDeliveries` carries the latest attempts.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Webhooks"
+        ],
+        "operationId": "webhooks.update",
+        "summary": "Amend a webhook endpoint",
+        "description": "Requires `webhooks:manage`. The signing secret is not amendable and is absent from the body: a caller-supplied secret would be a caller-chosen one, and rotating a secret needs an overlap window rather than a field on a PATCH. Re-enabling an endpoint the delivery worker disabled after repeated failures also clears its failure counter, so the next failure starts the count again rather than tripping the limit immediately.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "$ref": "#/components/parameters/XBusinessId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateWebhookRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "`data` carries `id`, `url`, `description`, `events`, `isActive`, `failureCount`, `disabledAt`, `lastSuccessAt`, `lastFailureAt` and timestamps. The signing secret is not among them and cannot be read back — it is returned only by the creation call.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with stored state: a duplicate, a booking race lost at the database exclusion constraint, or a status transition the lifecycle forbids.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Webhooks"
+        ],
+        "operationId": "webhooks.remove",
+        "summary": "Delete a webhook endpoint",
+        "description": "Requires `webhooks:manage`. A soft delete, so the delivery history stays readable and keeps pointing at a real endpoint: withdrawing a subscription must not erase the record of what was already sent where. Anything still queued for it is marked CANCELLED by the worker rather than quietly dropped.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "$ref": "#/components/parameters/XBusinessId"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The endpoint was removed and will receive nothing further."
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with stored state: a duplicate, a booking race lost at the database exclusion constraint, or a status transition the lifecycle forbids.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/webhooks/{id}/test": {
+      "post": {
+        "tags": [
+          "Webhooks"
+        ],
+        "operationId": "webhooks.test",
+        "summary": "Send a test event",
+        "description": "Requires `webhooks:manage` rather than `webhooks:read`: nothing about the endpoint changes, but the server opens an outbound connection to a customer-supplied URL, which is a write to the outside world. The `webhook.test` event is not subscribable, so a wildcard subscriber is never woken by somebody else's connectivity check. Answers 201 once the delivery is queued — the attempt has not happened yet, and its outcome shows up in the delivery history like any other event. A disabled endpoint is refused with 409 rather than accepted: the worker cancels anything addressed to one, so a 201 here would be the least useful possible answer to \"is this endpoint working?\".",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "$ref": "#/components/parameters/XBusinessId"
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "`data` is the queued delivery row, initially PENDING.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with stored state: a duplicate, a booking race lost at the database exclusion constraint, or a status transition the lifecycle forbids.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/webhooks/{id}/deliveries": {
+      "get": {
+        "tags": [
+          "Webhooks"
+        ],
+        "operationId": "webhooks.listDeliveries",
+        "summary": "List delivery attempts",
+        "description": "Requires `webhooks:read`. The debugging surface: status, attempt count, the response code and body the far end returned, and the error text when it did not answer at all. `eventId` is stable across every endpoint notified of one occurrence, so a single event can be traced through several subscribers.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            },
+            "required": false,
+            "name": "page",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            },
+            "required": false,
+            "name": "pageSize",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "PENDING",
+                "PROCESSING",
+                "DELIVERED",
+                "FAILED",
+                "CANCELLED"
+              ]
+            },
+            "required": false,
+            "name": "status",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": false,
+            "name": "event",
+            "in": "query"
+          },
+          {
+            "$ref": "#/components/parameters/XBusinessId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`data` is one page of delivery attempts, newest first, with their payloads.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/analytics/overview": {
       "get": {
         "tags": [
@@ -15744,6 +17737,441 @@
         }
       }
     },
+    "/api/v1/audit-logs": {
+      "get": {
+        "tags": [
+          "Audit"
+        ],
+        "operationId": "audit.list",
+        "summary": "Read the workspace audit trail",
+        "description": "Requires `audit:read`. Newest first, filterable by `action`, `entityType`, `entityId`, `actorUserId`, a date range and a free-text `search` over the actor, the verb and the entity type. `from` and `to` are calendar dates cut into whole days on the *workspace* clock rather than in UTC — a tenant asking what happened on 3 March means their 3 March — and the zone used is reported back as `meta.timezone` so a client can label its date pickers honestly.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            },
+            "required": false,
+            "name": "page",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 20
+            },
+            "required": false,
+            "name": "pageSize",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": false,
+            "name": "action",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": false,
+            "name": "entityType",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "entityId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "actorUserId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "from",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "to",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": false,
+            "name": "search",
+            "in": "query"
+          },
+          {
+            "$ref": "#/components/parameters/XBusinessId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`data` is one page of entries, each carrying `actorType`, `actorUserId`, `actorCustomerId`, `actorLabel`, `action`, `entityType`, `entityId`, `requestId`, `ipAddress`, `createdAt` and `metadata`. `actorLabel` is the snapshot taken when the entry was written, so an account renamed or deleted afterwards does not rewrite what the trail says happened, and nothing here is resolved through a join for the same reason. `businessId` is not among the fields: every row this surface can return is the caller's own, and echoing the id back would imply the feed could ever hold anything else.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/audit-logs/export.csv": {
+      "get": {
+        "tags": [
+          "Audit"
+        ],
+        "operationId": "audit.export",
+        "summary": "Export the audit trail as CSV",
+        "description": "Requires `audit:read` **and** `reports:export`, on the same reading as the appointment export: taking a copy out of the product is a separate act from reading it on screen. Takes the same filters as the list and no pagination — it is bounded by a hard row cap instead, because a page number would only produce a truncated file that looks complete. The response carries `X-Report-Row-Limit`, `X-Report-Matched-Rows` and `X-Report-Truncated`, plus `Cache-Control: no-store`, since the file names people, addresses and what they did. The export writes an audit entry of its own before the first byte: an owner taking the trail out of the product is exactly the event the trail exists to record.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": false,
+            "name": "action",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": false,
+            "name": "entityType",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "entityId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "actorUserId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "from",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": false,
+            "name": "to",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": false,
+            "name": "search",
+            "in": "query"
+          },
+          {
+            "$ref": "#/components/parameters/XBusinessId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The trail as a CSV document.",
+            "content": {
+              "text/csv": {
+                "schema": {
+                  "type": "string",
+                  "description": "CSV, UTF-8, one audit entry per row."
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/audit-logs/{id}": {
+      "get": {
+        "tags": [
+          "Audit"
+        ],
+        "operationId": "audit.get",
+        "summary": "Read one audit entry",
+        "description": "Requires `audit:read`. An entry belonging to another workspace, or a platform-level entry with no workspace at all, answers 404 rather than 403 — the id is matched against the caller's own workspace in the same statement, so a foreign id simply finds no row. Adds `userAgent` to the list shape: it is repetitive twenty rows at a time and exactly what an investigation into one entry wants.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          },
+          {
+            "$ref": "#/components/parameters/XBusinessId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`data` is the entry, carrying `actorType`, `actorUserId`, `actorCustomerId`, `actorLabel`, `action`, `entityType`, `entityId`, `requestId`, `ipAddress`, `createdAt` and `metadata` plus `userAgent`. `actorLabel` is the snapshot taken when the entry was written, so an account renamed or deleted afterwards does not rewrite what the trail says happened, and nothing here is resolved through a join for the same reason. `businessId` is not among the fields: every row this surface can return is the caller's own, and echoing the id back would imply the feed could ever hold anything else.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The membership behind the token exists but its effective permissions do not cover this action. Also returned when the user belongs to several workspaces and sent no X-Business-Id header to choose between them.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/admin/overview": {
       "get": {
         "tags": [
@@ -16900,6 +19328,691 @@
           },
           "404": {
             "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/profile": {
+      "get": {
+        "tags": [
+          "Customer Portal"
+        ],
+        "operationId": "portal.profile",
+        "summary": "Read my profile and the workspaces that know me",
+        "description": "Authenticated, not tenant-scoped, and no permission is checked — there is no membership to carry one. Reading this also reconciles the account with any address-book record that shares its email and is not yet linked, but **only once the address has been verified**: registration accepts any address, so linking on a bare email match would be an account-takeover primitive. Past that gate the link grants nothing new, since every one of those bookings already had its manage link delivered to that mailbox.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`data` carries `user`, `upcomingBookings` across every workspace, and `workspaces` — one entry per business that holds a record of this person, with its name, logo, timezone and support contacts. Workspaces are identified by the `cus_` handle of the record, never by an internal id.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/bookings": {
+      "get": {
+        "tags": [
+          "Customer Portal"
+        ],
+        "operationId": "portal.listBookings",
+        "summary": "List my bookings",
+        "description": "Every workspace at once, which is the point: a person does not think of their diary one business at a time. `when` names the intent — UPCOMING sorts soonest first, PAST sorts most recent first — so a dashboard does not have to send a sort order it would get wrong half the time. Rows are the summary shape: enough to render a card and decide what to open, with `internalNotes` and the rest of the staff-facing detail deliberately absent.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "default": 1
+            },
+            "required": false,
+            "name": "page",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 20
+            },
+            "required": false,
+            "name": "pageSize",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "UPCOMING",
+                "PAST",
+                "ALL"
+              ],
+              "default": "ALL"
+            },
+            "required": false,
+            "name": "when",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "PENDING",
+                "CONFIRMED",
+                "RESCHEDULED",
+                "IN_PROGRESS",
+                "COMPLETED",
+                "CANCELLED",
+                "NO_SHOW",
+                "REJECTED"
+              ]
+            },
+            "required": false,
+            "name": "status",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`data` is one page of bookings, each with its business, service, staff and location summaries and the times in the workspace timezone.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaginatedEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/bookings/{publicId}": {
+      "get": {
+        "tags": [
+          "Customer Portal"
+        ],
+        "operationId": "portal.getBooking",
+        "summary": "Read one of my bookings",
+        "description": "The same projection the anonymous manage link serves, reused rather than reimplemented so the two surfaces cannot drift on what a customer may see. Ownership is part of the query rather than a check applied to its result: a handle belonging to somebody else and a handle that never existed are the same 404.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^apt_[0-9A-HJKMNP-TV-Z]{26}$"
+            },
+            "required": true,
+            "name": "publicId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`data` is the booking as the customer-facing projection describes it.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/bookings/{publicId}/cancel": {
+      "post": {
+        "tags": [
+          "Customer Portal"
+        ],
+        "operationId": "portal.cancelBooking",
+        "summary": "Cancel one of my bookings",
+        "description": "Runs the workspace's own cancellation policy — the same code path, and the same notice deadline, as the anonymous manage link. Being signed in makes the cancellation attributable, not free: a 422 inside the deadline is the business rule answering, and it answers for a caller who happens to be a member of that workspace too, so this surface cannot become a policy bypass. The status history records a CUSTOMER actor and the audit entry names the user account, which is the one thing an anonymous manage link can never record.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^apt_[0-9A-HJKMNP-TV-Z]{26}$"
+            },
+            "required": true,
+            "name": "publicId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PortalCancelBookingRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the cancelled booking.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with stored state: a duplicate, a booking race lost at the database exclusion constraint, or a status transition the lifecycle forbids.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/bookings/{publicId}/reschedule": {
+      "post": {
+        "tags": [
+          "Customer Portal"
+        ],
+        "operationId": "portal.rescheduleBooking",
+        "summary": "Move one of my bookings",
+        "description": "Only the new instant is accepted. Provider and location are deliberately refused, as they are on the anonymous surface: the appointment already names both, and letting the customer reassign them would turn a reschedule into a way to book any provider in the workspace, outside whatever the booking link publishes. The reschedule deadline, the notice period and the availability check all apply, and a slot lost to a race answers 409.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^apt_[0-9A-HJKMNP-TV-Z]{26}$"
+            },
+            "required": true,
+            "name": "publicId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PortalRescheduleBookingRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the booking at its new time.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with stored state: a duplicate, a booking race lost at the database exclusion constraint, or a status transition the lifecycle forbids.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/preferences": {
+      "get": {
+        "tags": [
+          "Customer Portal"
+        ],
+        "operationId": "portal.getPreferences",
+        "summary": "Read my contact preferences",
+        "description": "Folded across every workspace that holds a record of this person, because there is no workspace to pick between — naming one would mean accepting the identifier this surface must never take. When the linked records disagree, which they can because staff edit the same column from the address book, the reported value is the conservative reading and `divergent` is true, so a client can say \"varies\" rather than presenting one workspace's answer as though it were universal.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`data` carries `preferences` (`emailEnabled`, `smsEnabled`, `marketingOptIn`, `reminderOffsetsMinutes`), `divergent` and `workspaceCount`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The payload failed schema validation, or a configured business rule rejected it — notice period, booking horizon, or a per-customer limit. `error.details` names the fields.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "The rate limit for this bucket was exceeded. The Retry-After header, and `error.meta.retryAfterSeconds`, give the wait in seconds.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "An unexpected fault. The body carries only a request id; the detail is in the server log.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Customer Portal"
+        ],
+        "operationId": "portal.updatePreferences",
+        "summary": "Change my contact preferences",
+        "description": "Applied to every linked record in one transaction, with an audit entry written per workspace so each business can see the change in its own trail. Merged over what is stored rather than replacing it, and no field has a default — a default would quietly reset the switches the person left alone. `reminderOffsetsMinutes: null` hands the schedule back to each workspace's own reminder policy. A patch from somebody with no linked records answers 409 rather than a 200 that stored nothing.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdatePreferencesRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "`data` is the preference view, in the shape GET returns.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuccessEnvelope"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "No usable access token was presented, or it has expired, been revoked, or was issued for a different audience. An unauthenticated request to an unknown path under /api/v1 also lands here rather than on a 404, so the management surface cannot be probed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such record inside the caller's workspace. Returned in place of 403 whenever a record belongs to another tenant, so no endpoint can be used as an existence oracle.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The request conflicts with stored state: a duplicate, a booking race lost at the database exclusion constraint, or a status transition the lifecycle forbids.",
             "content": {
               "application/json": {
                 "schema": {

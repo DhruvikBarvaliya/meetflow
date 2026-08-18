@@ -922,7 +922,7 @@
           "response": []
         },
         {
-          "name": "List workspace members",
+          "name": "List workspace members (superseded)",
           "request": {
             "method": "GET",
             "header": [
@@ -950,7 +950,7 @@
                 "members"
               ]
             },
-            "description": "Every membership in the workspace with its role. Requires `members:read`."
+            "description": "Every membership in the workspace with its role, unfiltered and unpaginated. Requires `members:read`. Superseded by `GET /api/v1/members`, which answers the same question with paging, search and filters; new clients should use that one. This path still works and is unchanged — retiring it is a breaking change and belongs to a release note rather than to a quiet removal — but it will not gain features."
           },
           "response": []
         },
@@ -1946,6 +1946,377 @@
             "body": {
               "mode": "raw",
               "raw": "{\n  \"serviceIds\": [\n    \"00000000-0000-0000-0000-000000000000\"\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Members",
+      "description": "Who belongs to the workspace, what each of them may do, and how somebody joins or leaves. This is the surface that hands out authority, so what it guarantees is what cannot happen: the last account able to manage roles cannot be demoted, suspended or removed, nobody may edit their own membership or the owners, and a member still holding upcoming appointments cannot be removed out from under them. A role change lands on the next request the affected person makes — effective permissions are read from the membership on every call rather than baked into a token — so a mistake is undone as fast as it was made, and revoking access does not wait for a session to expire. Two paths here are authenticated but not tenant-scoped, and say so.",
+      "item": [
+        {
+          "name": "List workspace members",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-Business-Id",
+                "value": "{{businessId}}",
+                "type": "text",
+                "description": "Selects which of the caller's own workspaces the request acts in. It is never a tenant assertion: the value is only used to pick among ACTIVE memberships the authenticated user already holds, and an id they do not belong to answers 404. Optional when the user belongs to exactly one workspace; required — with a 403 asking them to choose — when they belong to several."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/members",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "members"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1",
+                  "disabled": true
+                },
+                {
+                  "key": "pageSize",
+                  "value": "20",
+                  "disabled": true
+                },
+                {
+                  "key": "search",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "status",
+                  "value": "ACTIVE",
+                  "disabled": true
+                },
+                {
+                  "key": "roleId",
+                  "value": "00000000-0000-0000-0000-000000000000",
+                  "disabled": true
+                },
+                {
+                  "key": "includeRemoved",
+                  "value": "false",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Requires `members:read`. Supersedes `GET /api/v1/workspace/members`, which still answers but returns an unfiltered, unpaginated array; prefer this one, which adds paging, a search over name and email, and filters on status and role. `includeRemoved` brings back soft-deleted memberships so somebody who left can be found and invited again rather than entered as a stranger."
+          },
+          "response": []
+        },
+        {
+          "name": "Invite somebody to the workspace",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-Business-Id",
+                "value": "{{businessId}}",
+                "type": "text",
+                "description": "Selects which of the caller's own workspaces the request acts in. It is never a tenant assertion: the value is only used to pick among ACTIVE memberships the authenticated user already holds, and an id they do not belong to answers 404. Optional when the user belongs to exactly one workspace; required — with a 403 asking them to choose — when they belong to several."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/members/invite",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "members",
+                "invite"
+              ]
+            },
+            "description": "Requires `members:invite`. An invitation names an email address, never a user id: accepting one would turn this endpoint into an oracle for which accounts exist on the platform. An address with no account gets one created in the INVITED state together with a set-password link; an address that already has an account is attached to the workspace and the account itself is left completely untouched, so an invitation can never rewrite somebody's name or credentials. The invitation token is emailed, not returned here. A live membership for that address is a 409, and a previously removed one is re-invited rather than duplicated.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"customer@example.com\",\n  \"roleId\": \"00000000-0000-0000-0000-000000000000\",\n  \"firstName\": \"Ada\",\n  \"lastName\": \"Lovelace\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Change a member's role or status",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-Business-Id",
+                "value": "{{businessId}}",
+                "type": "text",
+                "description": "Selects which of the caller's own workspaces the request acts in. It is never a tenant assertion: the value is only used to pick among ACTIVE memberships the authenticated user already holds, and an id they do not belong to answers 404. Optional when the user belongs to exactly one workspace; required — with a 403 asking them to choose — when they belong to several."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/members/:id",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "members",
+                ":id"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Requires `members:update`. `status` accepts only ACTIVE and SUSPENDED: INVITED is written by the invitation flow and cleared by acceptance, and REMOVED belongs to the delete route, so neither is a state an operator sets by hand. Three refusals are worth knowing about, and all three answer 409: a caller cannot edit their own membership, nobody can edit the workspace owner's, and the last member holding `roles:manage` cannot be demoted or suspended — that one is the fastest way to lock a workspace out of itself. A role change takes effect on the affected person's next request; their existing token keeps working and simply carries less authority.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"roleId\": \"00000000-0000-0000-0000-000000000000\",\n  \"status\": \"ACTIVE\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Remove a member from the workspace",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-Business-Id",
+                "value": "{{businessId}}",
+                "type": "text",
+                "description": "Selects which of the caller's own workspaces the request acts in. It is never a tenant assertion: the value is only used to pick among ACTIVE memberships the authenticated user already holds, and an id they do not belong to answers 404. Optional when the user belongs to exactly one workspace; required — with a 403 asking them to choose — when they belong to several."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/members/:id",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "members",
+                ":id"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Requires `members:remove`. A soft delete, so the address can be invited again later and the person's audit history stays attributable. Their staff profile is retired in the same transaction — leaving it live would keep somebody who has left bookable — and the removal is refused with a 409 while they still hold upcoming appointments, because cancelling or reassigning those is a decision somebody has to make rather than a side effect of tidying up a list. Self-removal, removing the owner and removing the last member who can manage roles are all refused for the same reasons as PATCH."
+          },
+          "response": []
+        },
+        {
+          "name": "Read what one member may do",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-Business-Id",
+                "value": "{{businessId}}",
+                "type": "text",
+                "description": "Selects which of the caller's own workspaces the request acts in. It is never a tenant assertion: the value is only used to pick among ACTIVE memberships the authenticated user already holds, and an id they do not belong to answers 404. Optional when the user belongs to exactly one workspace; required — with a 403 asking them to choose — when they belong to several."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/members/:id/permissions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "members",
+                ":id",
+                "permissions"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Requires `members:read`. Answers the question a support conversation actually asks — \"why can they not do this?\" — by showing the role grant and the per-member exceptions separately, alongside the effective set the authorisation middleware will enforce."
+          },
+          "response": []
+        },
+        {
+          "name": "Replace one member's permission exceptions",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-Business-Id",
+                "value": "{{businessId}}",
+                "type": "text",
+                "description": "Selects which of the caller's own workspaces the request acts in. It is never a tenant assertion: the value is only used to pick among ACTIVE memberships the authenticated user already holds, and an id they do not belong to answers 404. Optional when the user belongs to exactly one workspace; required — with a 403 asking them to choose — when they belong to several."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/members/:id/permissions",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "members",
+                ":id",
+                "permissions"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Requires `roles:manage`, deliberately not the weaker `members:update` a Manager holds: a Manager may change who does which job, not what a job is allowed to do. A full replacement rather than a patch — whatever is absent is deleted — because a merge would make \"remove this DENY\" impossible to express. Refused on the caller themselves and on the workspace owner, since a DENY placed there is the quickest lockout in the product.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"overrides\": [\n    {\n      \"permission\": \"workspace:read\",\n      \"effect\": \"GRANT\"\n    }\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "List the invitations addressed to me",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/members/invitations",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "members",
+                "invitations"
+              ]
+            },
+            "description": "Authenticated and **not** tenant-scoped: the caller has been invited somewhere but belongs nowhere yet, so there is no membership for tenant resolution to find. No permission is checked either, and none is needed — the only rows this can return are invitations addressed to the caller's own account. Each one carries a freshly issued token, so a lost invitation email cannot strand somebody."
+          },
+          "response": []
+        },
+        {
+          "name": "Accept an invitation",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/members/accept",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "members",
+                "accept"
+              ]
+            },
+            "description": "Authenticated and **not** tenant-scoped, for the reason above. Both halves are required and neither is sufficient alone: the token says which invitation is being accepted, and the session proves the caller is the person it was addressed to. Everything that fails answers the same 404 — a token that is forged, expired, already used, withdrawn, or addressed to somebody else — so the endpoint cannot be used to probe which memberships exist. On success the membership becomes ACTIVE, which also closes the token: a replay finds nothing in the INVITED state to accept.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"token\": \"\"\n}",
               "options": {
                 "raw": {
                   "language": "json"
@@ -5218,6 +5589,345 @@
       ]
     },
     {
+      "name": "Webhooks",
+      "description": "Outbound event delivery: where a workspace wants to be told when its diary changes. Registering an endpoint points a workspace's event stream at a server of the registrant's choosing, which is a materially larger act than reading delivery history, so the built-in roles grant the two separately and only an owner may register one. The signing secret is returned exactly once, in the creation response, and is readable nowhere else in the API — losing it means replacing the endpoint. Payloads carry opaque identifiers and never a customer name, address or phone number, so a mistyped URL leaks ids rather than a person.",
+      "item": [
+        {
+          "name": "List webhook endpoints",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-Business-Id",
+                "value": "{{businessId}}",
+                "type": "text",
+                "description": "Selects which of the caller's own workspaces the request acts in. It is never a tenant assertion: the value is only used to pick among ACTIVE memberships the authenticated user already holds, and an id they do not belong to answers 404. Optional when the user belongs to exactly one workspace; required — with a 403 asking them to choose — when they belong to several."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/webhooks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "webhooks"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1",
+                  "disabled": true
+                },
+                {
+                  "key": "pageSize",
+                  "value": "20",
+                  "disabled": true
+                },
+                {
+                  "key": "isActive",
+                  "value": "true",
+                  "disabled": true
+                },
+                {
+                  "key": "event",
+                  "value": "*",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Requires `webhooks:read`. `event` narrows to the endpoints that would be notified of one event, wildcard subscribers included, which is how to answer \"who hears about a cancellation?\" without reading every row."
+          },
+          "response": []
+        },
+        {
+          "name": "Register a webhook endpoint",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-Business-Id",
+                "value": "{{businessId}}",
+                "type": "text",
+                "description": "Selects which of the caller's own workspaces the request acts in. It is never a tenant assertion: the value is only used to pick among ACTIVE memberships the authenticated user already holds, and an id they do not belong to answers 404. Optional when the user belongs to exactly one workspace; required — with a 403 asking them to choose — when they belong to several."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/webhooks",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "webhooks"
+              ]
+            },
+            "description": "Requires `webhooks:manage`, which the built-in roles grant to owners alone: pointing a workspace's event stream at an arbitrary host is an owner-level act. **The response is the only place the signing secret ever appears** — it is excluded from every read by the model default scope, so a client that does not store it now must delete the endpoint and register another. Omitting `events` subscribes to everything, including events added later. A workspace is capped at 20 endpoints, because each one is another insert inside the transaction that takes a booking.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"url\": \"https://example.com\",\n  \"description\": \"\",\n  \"events\": [\n    \"*\"\n  ],\n  \"isActive\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Read one webhook endpoint",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-Business-Id",
+                "value": "{{businessId}}",
+                "type": "text",
+                "description": "Selects which of the caller's own workspaces the request acts in. It is never a tenant assertion: the value is only used to pick among ACTIVE memberships the authenticated user already holds, and an id they do not belong to answers 404. Optional when the user belongs to exactly one workspace; required — with a 403 asking them to choose — when they belong to several."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/webhooks/:id",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "webhooks",
+                ":id"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Requires `webhooks:read`. Includes the most recent deliveries for triage."
+          },
+          "response": []
+        },
+        {
+          "name": "Amend a webhook endpoint",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-Business-Id",
+                "value": "{{businessId}}",
+                "type": "text",
+                "description": "Selects which of the caller's own workspaces the request acts in. It is never a tenant assertion: the value is only used to pick among ACTIVE memberships the authenticated user already holds, and an id they do not belong to answers 404. Optional when the user belongs to exactly one workspace; required — with a 403 asking them to choose — when they belong to several."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/webhooks/:id",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "webhooks",
+                ":id"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Requires `webhooks:manage`. The signing secret is not amendable and is absent from the body: a caller-supplied secret would be a caller-chosen one, and rotating a secret needs an overlap window rather than a field on a PATCH. Re-enabling an endpoint the delivery worker disabled after repeated failures also clears its failure counter, so the next failure starts the count again rather than tripping the limit immediately.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"url\": \"https://example.com\",\n  \"description\": \"\",\n  \"events\": [\n    \"*\"\n  ],\n  \"isActive\": false\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Delete a webhook endpoint",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-Business-Id",
+                "value": "{{businessId}}",
+                "type": "text",
+                "description": "Selects which of the caller's own workspaces the request acts in. It is never a tenant assertion: the value is only used to pick among ACTIVE memberships the authenticated user already holds, and an id they do not belong to answers 404. Optional when the user belongs to exactly one workspace; required — with a 403 asking them to choose — when they belong to several."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/webhooks/:id",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "webhooks",
+                ":id"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Requires `webhooks:manage`. A soft delete, so the delivery history stays readable and keeps pointing at a real endpoint: withdrawing a subscription must not erase the record of what was already sent where. Anything still queued for it is marked CANCELLED by the worker rather than quietly dropped."
+          },
+          "response": []
+        },
+        {
+          "name": "Send a test event",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-Business-Id",
+                "value": "{{businessId}}",
+                "type": "text",
+                "description": "Selects which of the caller's own workspaces the request acts in. It is never a tenant assertion: the value is only used to pick among ACTIVE memberships the authenticated user already holds, and an id they do not belong to answers 404. Optional when the user belongs to exactly one workspace; required — with a 403 asking them to choose — when they belong to several."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/webhooks/:id/test",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "webhooks",
+                ":id",
+                "test"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Requires `webhooks:manage` rather than `webhooks:read`: nothing about the endpoint changes, but the server opens an outbound connection to a customer-supplied URL, which is a write to the outside world. The `webhook.test` event is not subscribable, so a wildcard subscriber is never woken by somebody else's connectivity check. Answers 201 once the delivery is queued — the attempt has not happened yet, and its outcome shows up in the delivery history like any other event. A disabled endpoint is refused with 409 rather than accepted: the worker cancels anything addressed to one, so a 201 here would be the least useful possible answer to \"is this endpoint working?\"."
+          },
+          "response": []
+        },
+        {
+          "name": "List delivery attempts",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-Business-Id",
+                "value": "{{businessId}}",
+                "type": "text",
+                "description": "Selects which of the caller's own workspaces the request acts in. It is never a tenant assertion: the value is only used to pick among ACTIVE memberships the authenticated user already holds, and an id they do not belong to answers 404. Optional when the user belongs to exactly one workspace; required — with a 403 asking them to choose — when they belong to several."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/webhooks/:id/deliveries",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "webhooks",
+                ":id",
+                "deliveries"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1",
+                  "disabled": true
+                },
+                {
+                  "key": "pageSize",
+                  "value": "20",
+                  "disabled": true
+                },
+                {
+                  "key": "status",
+                  "value": "PENDING",
+                  "disabled": true
+                },
+                {
+                  "key": "event",
+                  "value": "",
+                  "disabled": true
+                }
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Requires `webhooks:read`. The debugging surface: status, attempt count, the response code and body the far end returned, and the error text when it did not answer at all. `eventId` is stable across every endpoint notified of one occurrence, so a single event can be traced through several subscribers."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
       "name": "Analytics",
       "description": "Aggregations over the appointment table.",
       "item": [
@@ -5755,6 +6465,200 @@
       ]
     },
     {
+      "name": "Audit",
+      "description": "The workspace's own copy of the trail every mutating service writes to. Read-only, and that is the property worth having: nothing on this surface can amend or delete an entry, so the record of what happened cannot be edited by whoever it happened to. Scoped by the query itself rather than by a filter applied afterwards — another tenant's entries and platform-level entries cannot be named, only missed. Entries carry the actor as a snapshot taken at the time, so a person renaming themselves later does not rewrite history.",
+      "item": [
+        {
+          "name": "Read the workspace audit trail",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-Business-Id",
+                "value": "{{businessId}}",
+                "type": "text",
+                "description": "Selects which of the caller's own workspaces the request acts in. It is never a tenant assertion: the value is only used to pick among ACTIVE memberships the authenticated user already holds, and an id they do not belong to answers 404. Optional when the user belongs to exactly one workspace; required — with a 403 asking them to choose — when they belong to several."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/audit-logs",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "audit-logs"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1",
+                  "disabled": true
+                },
+                {
+                  "key": "pageSize",
+                  "value": "20",
+                  "disabled": true
+                },
+                {
+                  "key": "action",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "entityType",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "entityId",
+                  "value": "00000000-0000-0000-0000-000000000000",
+                  "disabled": true
+                },
+                {
+                  "key": "actorUserId",
+                  "value": "00000000-0000-0000-0000-000000000000",
+                  "disabled": true
+                },
+                {
+                  "key": "from",
+                  "value": "2025-03-01",
+                  "disabled": true
+                },
+                {
+                  "key": "to",
+                  "value": "2025-03-01",
+                  "disabled": true
+                },
+                {
+                  "key": "search",
+                  "value": "",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Requires `audit:read`. Newest first, filterable by `action`, `entityType`, `entityId`, `actorUserId`, a date range and a free-text `search` over the actor, the verb and the entity type. `from` and `to` are calendar dates cut into whole days on the *workspace* clock rather than in UTC — a tenant asking what happened on 3 March means their 3 March — and the zone used is reported back as `meta.timezone` so a client can label its date pickers honestly."
+          },
+          "response": []
+        },
+        {
+          "name": "Export the audit trail as CSV",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-Business-Id",
+                "value": "{{businessId}}",
+                "type": "text",
+                "description": "Selects which of the caller's own workspaces the request acts in. It is never a tenant assertion: the value is only used to pick among ACTIVE memberships the authenticated user already holds, and an id they do not belong to answers 404. Optional when the user belongs to exactly one workspace; required — with a 403 asking them to choose — when they belong to several."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/audit-logs/export.csv",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "audit-logs",
+                "export.csv"
+              ],
+              "query": [
+                {
+                  "key": "action",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "entityType",
+                  "value": "",
+                  "disabled": true
+                },
+                {
+                  "key": "entityId",
+                  "value": "00000000-0000-0000-0000-000000000000",
+                  "disabled": true
+                },
+                {
+                  "key": "actorUserId",
+                  "value": "00000000-0000-0000-0000-000000000000",
+                  "disabled": true
+                },
+                {
+                  "key": "from",
+                  "value": "2025-03-01",
+                  "disabled": true
+                },
+                {
+                  "key": "to",
+                  "value": "2025-03-01",
+                  "disabled": true
+                },
+                {
+                  "key": "search",
+                  "value": "",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Requires `audit:read` **and** `reports:export`, on the same reading as the appointment export: taking a copy out of the product is a separate act from reading it on screen. Takes the same filters as the list and no pagination — it is bounded by a hard row cap instead, because a page number would only produce a truncated file that looks complete. The response carries `X-Report-Row-Limit`, `X-Report-Matched-Rows` and `X-Report-Truncated`, plus `Cache-Control: no-store`, since the file names people, addresses and what they did. The export writes an audit entry of its own before the first byte: an owner taking the trail out of the product is exactly the event the trail exists to record."
+          },
+          "response": []
+        },
+        {
+          "name": "Read one audit entry",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "X-Business-Id",
+                "value": "{{businessId}}",
+                "type": "text",
+                "description": "Selects which of the caller's own workspaces the request acts in. It is never a tenant assertion: the value is only used to pick among ACTIVE memberships the authenticated user already holds, and an id they do not belong to answers 404. Optional when the user belongs to exactly one workspace; required — with a 403 asking them to choose — when they belong to several."
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/audit-logs/:id",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "audit-logs",
+                ":id"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "00000000-0000-0000-0000-000000000000"
+                }
+              ]
+            },
+            "description": "Requires `audit:read`. An entry belonging to another workspace, or a platform-level entry with no workspace at all, answers 404 rather than 403 — the id is matched against the caller's own workspace in the same statement, so a foreign id simply finds no row. Adds `userAgent` to the list shape: it is repetitive twenty rows at a time and exactly what an investigation into one entry wants."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
       "name": "Platform Admin",
       "description": "Operating the platform itself, and the only endpoints that read across tenants. They require `platformRole = ADMIN` and are not tenant-scoped — X-Business-Id plays no part here, because an operator holds no membership in the workspaces they administer. What they expose is workspaces, platform accounts and counts; never customer names, contact details, appointment contents or notes. Running the platform is no reason to read a clinic's patient list, and the shape of these responses is what enforces that.",
       "item": [
@@ -6206,6 +7110,288 @@
               ]
             },
             "description": "Requires platform administrator access. Distinct from the unauthenticated /health and /ready probes, which answer \"is this process alive\" for an orchestrator: this one reports on PostgreSQL, Redis and the notification outbox, which is operator information rather than something to expose at the edge. It answers 200 even when a dependency is down — a 503 would make the one page that could explain an outage disappear during one — so read `database.ok`, `redis.ok` and the outbox counters rather than the status code."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Customer Portal",
+      "description": "A customer reading and changing their own bookings, across every workspace that has a record of them. **Authenticated but not tenant-scoped** — X-Business-Id plays no part here, because a customer holds no membership to select among; they are a person who appears in one or more workspaces' address books. Every response is built from the customer records tied to the signed-in account, so this surface returns only rows belonging to the person asking, and a booking reference belonging to somebody else is indistinguishable from one that never existed: both answer 404. Cancelling or rescheduling runs the workspace booking policy exactly as the anonymous manage link does, so signing in is never a way round a notice period — including for somebody who happens to be a member of that workspace as well.",
+      "item": [
+        {
+          "name": "Read my profile and the workspaces that know me",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/me/profile",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "me",
+                "profile"
+              ]
+            },
+            "description": "Authenticated, not tenant-scoped, and no permission is checked — there is no membership to carry one. Reading this also reconciles the account with any address-book record that shares its email and is not yet linked, but **only once the address has been verified**: registration accepts any address, so linking on a bare email match would be an account-takeover primitive. Past that gate the link grants nothing new, since every one of those bookings already had its manage link delivered to that mailbox."
+          },
+          "response": []
+        },
+        {
+          "name": "List my bookings",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/me/bookings",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "me",
+                "bookings"
+              ],
+              "query": [
+                {
+                  "key": "page",
+                  "value": "1",
+                  "disabled": true
+                },
+                {
+                  "key": "pageSize",
+                  "value": "20",
+                  "disabled": true
+                },
+                {
+                  "key": "when",
+                  "value": "ALL",
+                  "disabled": true
+                },
+                {
+                  "key": "status",
+                  "value": "PENDING",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Every workspace at once, which is the point: a person does not think of their diary one business at a time. `when` names the intent — UPCOMING sorts soonest first, PAST sorts most recent first — so a dashboard does not have to send a sort order it would get wrong half the time. Rows are the summary shape: enough to render a card and decide what to open, with `internalNotes` and the rest of the staff-facing detail deliberately absent."
+          },
+          "response": []
+        },
+        {
+          "name": "Read one of my bookings",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/me/bookings/:publicId",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "me",
+                "bookings",
+                ":publicId"
+              ],
+              "variable": [
+                {
+                  "key": "publicId",
+                  "value": "apt_00000000000000000000000000"
+                }
+              ]
+            },
+            "description": "The same projection the anonymous manage link serves, reused rather than reimplemented so the two surfaces cannot drift on what a customer may see. Ownership is part of the query rather than a check applied to its result: a handle belonging to somebody else and a handle that never existed are the same 404."
+          },
+          "response": []
+        },
+        {
+          "name": "Cancel one of my bookings",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/me/bookings/:publicId/cancel",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "me",
+                "bookings",
+                ":publicId",
+                "cancel"
+              ],
+              "variable": [
+                {
+                  "key": "publicId",
+                  "value": "apt_00000000000000000000000000"
+                }
+              ]
+            },
+            "description": "Runs the workspace's own cancellation policy — the same code path, and the same notice deadline, as the anonymous manage link. Being signed in makes the cancellation attributable, not free: a 422 inside the deadline is the business rule answering, and it answers for a caller who happens to be a member of that workspace too, so this surface cannot become a policy bypass. The status history records a CUSTOMER actor and the audit entry names the user account, which is the one thing an anonymous manage link can never record.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Move one of my bookings",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/me/bookings/:publicId/reschedule",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "me",
+                "bookings",
+                ":publicId",
+                "reschedule"
+              ],
+              "variable": [
+                {
+                  "key": "publicId",
+                  "value": "apt_00000000000000000000000000"
+                }
+              ]
+            },
+            "description": "Only the new instant is accepted. Provider and location are deliberately refused, as they are on the anonymous surface: the appointment already names both, and letting the customer reassign them would turn a reschedule into a way to book any provider in the workspace, outside whatever the booking link publishes. The reschedule deadline, the notice period and the availability check all apply, and a slot lost to a race answers 409.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"startsAt\": \"2025-03-01T09:00:00Z\",\n  \"reason\": \"\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "response": []
+        },
+        {
+          "name": "Read my contact preferences",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/me/preferences",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "me",
+                "preferences"
+              ]
+            },
+            "description": "Folded across every workspace that holds a record of this person, because there is no workspace to pick between — naming one would mean accepting the identifier this surface must never take. When the linked records disagree, which they can because staff edit the same column from the address book, the reported value is the conservative reading and `divergent` is true, so a client can say \"varies\" rather than presenting one workspace's answer as though it were universal."
+          },
+          "response": []
+        },
+        {
+          "name": "Change my contact preferences",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/v1/me/preferences",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "me",
+                "preferences"
+              ]
+            },
+            "description": "Applied to every linked record in one transaction, with an audit entry written per workspace so each business can see the change in its own trail. Merged over what is stored rather than replacing it, and no field has a default — a default would quietly reset the switches the person left alone. `reminderOffsetsMinutes: null` hands the schedule back to each workspace's own reminder policy. A patch from somebody with no linked records answers 409 rather than a 200 that stored nothing.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"emailEnabled\": false,\n  \"smsEnabled\": false,\n  \"marketingOptIn\": false,\n  \"reminderOffsetsMinutes\": [\n    0\n  ]\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
           },
           "response": []
         }

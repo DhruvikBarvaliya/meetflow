@@ -72,6 +72,8 @@ import {
 import { emitAppointmentEvent, emitToWorkspace, SocketEvents } from '../../sockets';
 import { AuditActions, recordAudit } from '../audit/audit.service';
 import { enqueueNotification } from '../notifications/notification.service';
+import { publishAppointmentWebhook } from '../webhooks/webhooks.service';
+import { WebhookEvents } from '../webhooks/webhooks.validation';
 import {
   getPolicyFor,
   verifySlot,
@@ -823,6 +825,18 @@ export async function createBooking(input: CreateBookingInput): Promise<BookingR
           { appointment, customer, service, staffProfile, business, policy },
           transaction,
         );
+
+        // Subscribers learn about a booking on exactly the terms the customer
+        // does: the delivery rows are written inside this transaction, so a
+        // rollback — including the lost create-race retried above — takes them
+        // with it, and the queue is only touched after the commit.
+        await publishAppointmentWebhook(WebhookEvents.APPOINTMENT_CREATED, appointment, {
+          transaction,
+          // A group session announces one event per attendee who joins it, as
+          // the socket layer does; the participant is what tells a subscriber
+          // which of the two it just heard about.
+          extra: { joinedExisting, participantId: participant.id },
+        });
 
         if (idempotencyRecord) {
           await idempotencyRecord.update(
