@@ -1,0 +1,266 @@
+# Continuous integration.
+#
+# This file exists because its absence was a defect. The repository defines its
+# own quality gate — `npm run verify` — and nothing ran it, so `eslint .` sat red
+# for a full day of commits without anyone noticing, and the generated API
+# contracts drifted from the routes they describe. A gate nobody executes is a
+# gate that is already open.
+#
+# Five jobs, deliberately separate so a failure names its own cause rather than
+# being buried in one long log:
+#
+#   verify     the repo's own gate: format, lint, typecheck, tests, build
+#   contracts  regenerate OpenAPI + Postman and fail on any diff
+#   e2e        Playwright against a real stack booted from scratch
+#   docker     the production images actually build
+#   secrets    the secret scanner that documents itself as a hook nothing invoked
+#
+# `verify`, `contracts` and `e2e` all need real PostgreSQL and Redis. Nothing
+# here is mocked, for the same reason the test suite is not: the guarantees
+# worth protecting — exclusion constraints, row locks, rate limits — exist only
+# in the real services.
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+concurrency:
+  # A new push supersedes an in-flight run on the same ref. `main` is exempt:
+  # its runs are the record of what was released and are never cancelled.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  NODE_VERSION: '20'
+  # Matches the credentials the service containers below are created with, and
+  # the defaults in sequelize-cli.config.cjs.
+  PGUSER: meetflow
+  PGPASSWORD: meetflow
+
+jobs:
+  # ---------------------------------------------------------------------------
+  verify:
+    name: Verify (format · lint · types · tests · build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        # 16, matching docker-compose.yml. The migrations create btree_gist,
+        # which the official image ships in contrib.
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: meetflow
+          POSTGRES_PASSWORD: meetflow
+          POSTGRES_DB: meetflow_dev
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U meetflow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://meetflow:meetflow@localhost:5432/meetflow_dev
+      # The suite migrates this database from empty on every run, which doubles
+      # as the "fresh migration works" check. It must never be DATABASE_URL.
+      TEST_DATABASE_URL: postgres://meetflow:meetflow@localhost:5432/meetflow_test
+      REDIS_URL: redis://localhost:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Create the test database
+        run: psql -h localhost -U meetflow -d postgres -c 'CREATE DATABASE meetflow_test;'
+
+      # Run as one command rather than five steps: `verify` is the gate the
+      # repository documents, and CI must fail on exactly what a developer's
+      # own `npm run verify` would fail on. Splitting it here would let the two
+      # drift.
+      - name: npm run verify
+        run: npm run verify
+
+  # ---------------------------------------------------------------------------
+  contracts:
+    name: API contracts are current
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # The three-way parity between mounted routes, docs/openapi.json and the
+      # Postman collection held when it was last audited — but nothing enforced
+      # it, and the collection had already been left a release behind once. Both
+      # documents are generated from the zod schemas, so regenerating them must
+      # be a no-op on a correct tree.
+      - name: Regenerate OpenAPI and Postman
+        run: npm --workspace server run contracts:export
+
+      - name: Fail if either drifted
+        run: |
+          if ! git diff --quiet -- docs/openapi.json docs/postman/; then
+            echo "::error::The generated API contracts are stale."
+            echo "Run 'npm --workspace server run contracts:export' and commit the result."
+            git diff --stat -- docs/openapi.json docs/postman/
+            exit 1
+          fi
+          echo "OpenAPI and Postman match the routes."
+
+  # ---------------------------------------------------------------------------
+  e2e:
+    name: End-to-end
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: meetflow
+          POSTGRES_PASSWORD: meetflow
+          POSTGRES_DB: meetflow_dev
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U meetflow"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://meetflow:meetflow@localhost:5432/meetflow_dev
+      REDIS_URL: redis://localhost:6379
+      # One spec — the platform-admin block — reads the seeded operator, because
+      # platform admin cannot be granted through any API by design. Without the
+      # seed those tests skip rather than fail, which would quietly reduce
+      # coverage while the suite still reported green.
+      SEED_ENABLED: 'true'
+      APP_ENV: development
+      NODE_ENV: development
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Install Chromium
+        run: npm --workspace e2e run install:browsers
+
+      - name: Migrate and seed
+        run: |
+          npm run db:migrate
+          npm run db:seed
+
+      # Playwright's own webServer block boots the API and the client, and with
+      # CI set it refuses to reuse anything already listening — so this gets a
+      # clean stack rather than whatever a previous job left behind.
+      - name: Playwright
+        run: npm run test:e2e
+
+      - name: Upload the report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: e2e/playwright-report/
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Production images build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Built, not pushed. The question this answers is "does the production
+      # image still assemble" — a broken Dockerfile is otherwise discovered at
+      # deploy time, which is the worst moment to discover it.
+      - name: Build the API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/server.Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build the client image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/client.Dockerfile
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The scanner reads the working tree, but a pushed range is worth
+          # having in full so a secret added and reverted in the same branch is
+          # still visible in the log.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # scripts/secret-scan.mjs documents itself as a pre-commit hook. No hook
+      # was ever installed, so until now it had never run anywhere.
+      - name: Scan
+        run: node scripts/secret-scan.mjs
