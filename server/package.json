@@ -23,7 +23,7 @@
     "db:migrate:undo:all": "sequelize-cli db:migrate:undo:all",
     "db:seed": "sequelize-cli db:seed:all",
     "db:seed:undo": "sequelize-cli db:seed:undo:all",
-    "db:reset": "sequelize-cli db:migrate:undo:all && sequelize-cli db:migrate && sequelize-cli db:seed:all",
+    "db:reset": "node scripts/db-reset.mjs",
     "openapi:export": "tsx src/scripts/export-openapi.ts",
     "postman:export": "tsx src/scripts/export-postman.ts",
     "contracts:export": "npm run openapi:export && npm run postman:export"

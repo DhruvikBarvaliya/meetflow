@@ -99,6 +99,11 @@ export const AuditActions = {
 
   // Reporting
   REPORT_EXPORTED: 'report.exported',
+
+  // Platform administration
+  PLATFORM_WORKSPACE_STATUS_CHANGED: 'platform.workspace_status_changed',
+  PLATFORM_USER_STATUS_CHANGED: 'platform.user_status_changed',
+  PLATFORM_USER_ROLE_CHANGED: 'platform.user_role_changed',
 } as const;
 
 export type AuditAction = (typeof AuditActions)[keyof typeof AuditActions];

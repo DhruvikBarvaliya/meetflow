@@ -117,7 +117,15 @@ export type BookingLinkType = 'CATALOG' | 'SINGLE_SERVICE' | 'TEAM' | 'STAFF';
 
 export type MembershipStatus = 'INVITED' | 'ACTIVE' | 'SUSPENDED' | 'REMOVED';
 
-export type UserStatus = 'PENDING' | 'ACTIVE' | 'SUSPENDED' | 'DEACTIVATED';
+/**
+ * Sourced from `USER_STATUSES` in server/src/database/models/User.ts, which is
+ * also what the column's CHECK constraint enforces.
+ *
+ * The invited state is INVITED, not PENDING: an account created by an
+ * invitation sits here until the invitation is accepted. PENDING belongs to
+ * `AppointmentStatus` and never appears on a user.
+ */
+export type UserStatus = 'ACTIVE' | 'INVITED' | 'SUSPENDED' | 'DEACTIVATED';
 
 export type PlatformRole = 'USER' | 'ADMIN';
 
@@ -855,4 +863,356 @@ export interface PublicBookingConfirmation {
   participantPublicId: string;
   manageUrl: string;
   replayed: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Platform administration
+// ---------------------------------------------------------------------------
+
+/**
+ * `/api/v1/admin` — the operator's surface, read from
+ * `server/src/modules/admin/admin.service.ts`.
+ *
+ * Two properties of this contract are visible in the shapes below and are the
+ * reason they look the way they do.
+ *
+ * **It is not tenant-scoped.** A platform admin holds no membership in the
+ * workspaces they administer, so nothing here is resolved from the caller's
+ * session: a workspace id is an ordinary parameter. That is also why these
+ * types sit apart from the `Workspace` and `WorkspaceMember` shapes above,
+ * which describe the workspace you belong to rather than one you are looking
+ * in on.
+ *
+ * **It exposes workspaces, platform accounts and counts — never contents.**
+ * There is no admin type for a customer, an appointment or a note, because the
+ * API has no field to put one in. Someone running the platform has no business
+ * reading a clinic's patient list, and the shape of the response is what
+ * enforces that rather than a filter someone could forget. If a screen ever
+ * seems to need a name or an address from here, that is a contract argument to
+ * have on the server, not a type to widen quietly.
+ */
+
+/** Mirrors `BUSINESS_STATUSES` in the server's Business model. */
+export type AdminWorkspaceStatus = 'ACTIVE' | 'SUSPENDED' | 'ARCHIVED';
+
+/**
+ * The statuses an operator may *set* on an account — `UserStatus` minus one.
+ *
+ * INVITED is a state the invitation flow enters and that accepting an
+ * invitation leaves. Set by hand it would produce an account waiting for an
+ * invitation nobody sent, and nothing in the product would resolve that, so the
+ * server's schema refuses it. Offering it in the UI would only ever yield a
+ * validation error.
+ */
+export type AdminUserStatusUpdate = 'ACTIVE' | 'SUSPENDED' | 'DEACTIVATED';
+
+/** Mirrors `AUDIT_ACTOR_TYPES` in the server's AuditLog model. */
+export type AdminAuditActorType = 'USER' | 'CUSTOMER' | 'SYSTEM' | 'PUBLIC' | 'API';
+
+/** `GET /admin/overview` — one request behind the whole landing screen. */
+export interface AdminOverview {
+  workspaces: {
+    total: number;
+    active: number;
+    suspended: number;
+    archived: number;
+    createdLast30Days: number;
+  };
+  users: {
+    total: number;
+    active: number;
+    invited: number;
+    suspended: number;
+    deactivated: number;
+    admins: number;
+    createdLast30Days: number;
+  };
+  appointments: {
+    total: number;
+    upcoming: number;
+    last30Days: number;
+    cancelledLast30Days: number;
+  };
+  /** A count only. The admin surface never lists a customer. */
+  customers: { total: number };
+  /**
+   * The last 14 days inclusive of today, counted in **UTC** days and
+   * zero-filled: a quiet day arrives as a zero rather than as a missing key, so
+   * a chart can plot the series straight through without reindexing it. UTC
+   * rather than workspace days because the series spans every timezone on the
+   * platform at once, and no single one of them is the right answer.
+   */
+  bookingsByDay: Array<{ date: string; count: number }>;
+  /** The five busiest workspaces of the last 30 days, most bookings first. */
+  topWorkspaces: Array<{
+    businessId: string;
+    name: string;
+    slug: string;
+    status: AdminWorkspaceStatus;
+    appointmentsLast30Days: number;
+  }>;
+  generatedAt: string;
+}
+
+export interface AdminWorkspaceOwner {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+}
+
+/**
+ * What a workspace holds *now*.
+ *
+ * Every count but `appointments` excludes soft-deleted rows, because the
+ * question an operator is asking is what the workspace has today rather than
+ * what it has ever had. Appointments have no soft delete at all — a cancelled
+ * booking keeps its row as history — so that figure is the lifetime total and
+ * the cancelled ones are inside it.
+ */
+export interface AdminWorkspaceCounts {
+  members: number;
+  staff: number;
+  services: number;
+  locations: number;
+  appointments: number;
+  customers: number;
+}
+
+/** A row in `GET /admin/workspaces`. */
+export interface AdminWorkspaceSummary {
+  id: string;
+  name: string;
+  slug: string;
+  status: AdminWorkspaceStatus;
+  timezone: string;
+  currency: string;
+  industry: string | null;
+  /** Null when the owning account has been soft-deleted out from under it. */
+  owner: AdminWorkspaceOwner | null;
+  counts: AdminWorkspaceCounts;
+  /** Null for a workspace that has never taken a booking. */
+  lastAppointmentAt: string | null;
+  createdAt: string;
+}
+
+export interface AdminWorkspaceMember {
+  membershipId: string;
+  status: MembershipStatus;
+  roleKey: string;
+  roleName: string;
+  /** Null while an invitation is outstanding — nobody has joined yet. */
+  joinedAt: string | null;
+  user: {
+    id: string;
+    email: string;
+    firstName: string;
+    lastName: string;
+    status: UserStatus;
+    platformRole: PlatformRole;
+  };
+}
+
+/**
+ * One audit row, trimmed to what a workspace panel shows.
+ *
+ * Deliberately narrower than `AdminAuditEntry`: this list sits inside a
+ * workspace the operator does not belong to, so it carries the verb and who
+ * performed it and nothing about what was booked or said.
+ */
+export interface AdminWorkspaceActivity {
+  id: string;
+  action: string;
+  entityType: string;
+  /** Null for system actors, which have no account to name. */
+  actorLabel: string | null;
+  createdAt: string;
+}
+
+/**
+ * The appointment mix for one workspace.
+ *
+ * The server types `status` as a bare string because it reads the column
+ * without interpreting it; the CHECK constraint on that column admits nothing
+ * outside `AppointmentStatus`, which is what lets the status badges consume
+ * this list directly.
+ */
+export interface AdminAppointmentStatusCount {
+  status: AppointmentStatus;
+  count: number;
+}
+
+/** `GET /admin/workspaces/:id`, and the answer to the status PATCH. */
+export interface AdminWorkspaceDetail extends AdminWorkspaceSummary {
+  legalName: string | null;
+  description: string | null;
+  websiteUrl: string | null;
+  supportEmail: string | null;
+  supportPhone: string | null;
+  /** Not nullable: the column has a default, unlike the five above it. */
+  locale: string;
+  members: AdminWorkspaceMember[];
+  appointmentsByStatus: AdminAppointmentStatusCount[];
+  /** The last 20 audit rows for this workspace, most recent first. */
+  recentActivity: AdminWorkspaceActivity[];
+}
+
+/** The body of `PATCH /admin/workspaces/:id/status`. */
+export interface AdminWorkspaceStatusUpdate {
+  status: AdminWorkspaceStatus;
+  /**
+   * Recorded in the audit row and nowhere else. Suspending a paying customer's
+   * workspace is the kind of action that gets asked about weeks later, and the
+   * trail is worth far more when it says why. The server refuses an empty
+   * string, so an untouched field has to be omitted rather than sent blank —
+   * `updateAdminWorkspaceStatus` does that for its callers.
+   */
+  reason?: string;
+}
+
+/** A row in `GET /admin/users`. */
+export interface AdminUserSummary {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  fullName: string;
+  platformRole: PlatformRole;
+  status: UserStatus;
+  emailVerified: boolean;
+  lastLoginAt: string | null;
+  /** How many workspaces this account belongs to, and how many it owns. */
+  workspaceCount: number;
+  ownedWorkspaceCount: number;
+  createdAt: string;
+}
+
+export interface AdminUserMembership {
+  membershipId: string;
+  businessId: string;
+  businessName: string;
+  businessSlug: string;
+  businessStatus: AdminWorkspaceStatus;
+  roleKey: string;
+  roleName: string;
+  status: MembershipStatus;
+  joinedAt: string | null;
+  /** True when this account owns the workspace rather than merely joining it. */
+  isOwner: boolean;
+}
+
+/** `GET /admin/users/:id`, and the answer to both user PATCHes. */
+export interface AdminUserDetail extends AdminUserSummary {
+  phone: string | null;
+  timezone: string;
+  locale: string;
+  /**
+   * Set by the login throttle, so a value in the future is the reason a support
+   * ticket says "I cannot sign in" while the status still reads ACTIVE. It is
+   * the first thing worth checking on this screen.
+   */
+  lockedUntil: string | null;
+  failedLoginCount: number;
+  /** Live refresh-token families: how many devices are still signed in. */
+  activeSessionCount: number;
+  memberships: AdminUserMembership[];
+}
+
+/** A row in `GET /admin/audit-logs`, ordered newest first. */
+export interface AdminAuditEntry {
+  id: string;
+  /** Null for platform-level actions, which belong to no workspace. */
+  businessId: string | null;
+  businessName: string | null;
+  actorType: AdminAuditActorType;
+  actorLabel: string | null;
+  actorUserId: string | null;
+  /** The dotted verb, e.g. `appointment.cancelled`. */
+  action: string;
+  entityType: string;
+  entityId: string | null;
+  /** Ties a row back to one request in the server logs. */
+  requestId: string | null;
+  ipAddress: string | null;
+  createdAt: string;
+  /**
+   * Whatever the writing module recorded. The shape varies by action, so it is
+   * read defensively rather than cast, and never used as a lookup key.
+   */
+  metadata: Record<string, unknown>;
+}
+
+/**
+ * `GET /admin/health`.
+ *
+ * Answered with a 200 even when a dependency is down: the endpoint reports on
+ * the platform rather than on itself, and a 503 would make the one page that
+ * could explain an outage disappear during one. Read `ok`, never the status
+ * code.
+ */
+export interface AdminHealth {
+  database: { ok: boolean; latencyMs: number; error: string | null };
+  redis: { ok: boolean; latencyMs: number; error: string | null };
+  outbox: {
+    pending: number;
+    processing: number;
+    sent: number;
+    failed: number;
+    cancelled: number;
+    /** PENDING and already due — the backlog that ought to be draining now. */
+    dueNow: number;
+    /**
+     * Null means nothing is pending at all, which is not the same as "the
+     * oldest pending message is zero seconds old". Render the two differently.
+     */
+    oldestPendingAgeSeconds: number | null;
+  };
+  api: { environment: string; node: string; uptimeSeconds: number; apiVersion: 'v1' };
+  generatedAt: string;
+}
+
+export type AdminWorkspaceSort = 'newest' | 'oldest' | 'name' | 'appointments';
+
+export type AdminUserSort = 'newest' | 'oldest' | 'name' | 'lastLogin';
+
+/*
+ * The filter shapes each admin list page holds in state.
+ *
+ * Every field is required, and "unset" is the empty string rather than
+ * `undefined`, for two reasons. A `useState` initialiser stays total, so adding
+ * a filter later breaks compilation at every call site instead of quietly
+ * defaulting. And `toSearchParams` drops empty strings, so this state can go
+ * straight to the query string with no per-field ternary — which matters
+ * because the server's query schemas are `.strict()` and reject an empty
+ * `?search=` rather than treating it as absent.
+ */
+
+export interface AdminWorkspaceFilters {
+  page: number;
+  search: string;
+  status: AdminWorkspaceStatus | '';
+  sort: AdminWorkspaceSort;
+}
+
+export interface AdminUserFilters {
+  page: number;
+  search: string;
+  status: UserStatus | '';
+  platformRole: PlatformRole | '';
+  sort: AdminUserSort;
+}
+
+export interface AdminAuditFilters {
+  page: number;
+  businessId: string;
+  action: string;
+  entityType: string;
+  /** Calendar dates, `YYYY-MM-DD`, both bounds inclusive and read as UTC days. */
+  from: string;
+  to: string;
+  /**
+   * Accepted by the endpoint but not yet surfaced as a control, so that a link
+   * from a user's detail page can pre-filter the log to that account.
+   */
+  actorUserId?: string;
 }

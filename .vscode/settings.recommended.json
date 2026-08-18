@@ -1,0 +1,36 @@
+{
+  // Copy to .vscode/settings.json to use. That file is gitignored, so nobody's
+  // personal editor preferences end up in the repository — only this baseline,
+  // which exists because one of its settings is a correctness issue rather than
+  // a preference.
+
+  // Type-check with the compiler the project actually builds with.
+  //
+  // Without this, VS Code uses its own bundled TypeScript, which drifts ahead of
+  // the version in package.json. The editor then reports diagnostics that `tsc`,
+  // the build and CI all disagree with — red squiggles on green code, which is
+  // worse than no diagnostics at all, because it teaches people to ignore them.
+  "typescript.tsdk": "node_modules/typescript/lib",
+  "typescript.enablePromptUseWorkspaceTsdk": true,
+
+  // The repo is Prettier-formatted and `npm run lint` enforces it.
+  "editor.defaultFormatter": "esbenp.prettier-vscode",
+  "editor.formatOnSave": true,
+  "editor.codeActionsOnSave": {
+    "source.fixAll.eslint": "explicit"
+  },
+
+  // Build output and dependencies are noise in search and in the file watcher.
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/dist": true,
+    "**/.tmp": true,
+    "**/test-results": true,
+    "**/playwright-report": true
+  },
+  "files.watcherExclude": {
+    "**/node_modules/**": true,
+    "**/dist/**": true,
+    "**/.tmp/**": true
+  }
+}

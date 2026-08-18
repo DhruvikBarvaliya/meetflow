@@ -3,11 +3,7 @@
   "compilerOptions": {
     "rootDir": ".",
     "outDir": "dist",
-    "baseUrl": ".",
-    "types": ["node"],
-    "paths": {
-      "@/*": ["src/*"]
-    }
+    "types": ["node"]
   },
   "include": ["src/**/*.ts", "tests/**/*.ts", "vitest.config.ts"],
   "exclude": ["node_modules", "dist", "migrations", "seeders"]
