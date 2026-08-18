@@ -44,7 +44,10 @@ async function main(): Promise<void> {
   if (env.RUN_WORKER_IN_API) {
     // Development convenience only; production runs the dedicated worker
     // container so API latency is never affected by job processing.
-    const { startWorkers } = await import('./worker');
+    // `.js`, not `.ts`: a dynamic import is an ECMAScript specifier and names
+    // the file that will exist at runtime, which is the compiled output. tsx
+    // resolves it back to ./worker.ts in development.
+    const { startWorkers } = await import('./worker.js');
     await startWorkers({ standalone: false });
     logger.warn('background workers are running inside the API process (development only)');
   }

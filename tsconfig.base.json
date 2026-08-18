@@ -3,8 +3,18 @@
   "compilerOptions": {
     "target": "ES2022",
     "lib": ["ES2022"],
-    "moduleResolution": "node",
-    "module": "CommonJS",
+
+    /* `node16` rather than the older `node`/`CommonJS` pair, which TypeScript
+       6.0 reports as deprecated (TS5107) and 7.0 removes outright.
+
+       The emit is unchanged: server/package.json declares no `"type"`, so every
+       .ts file under it is still a CommonJS module and still compiles to
+       `require`. What does change is resolution — `node16` honours the
+       `exports` and `imports` maps in a dependency's package.json, which is how
+       the ecosystem has published types for years and which the old resolver
+       ignored. That is a correctness improvement, not a compromise. */
+    "module": "node16",
+    "moduleResolution": "node16",
 
     /* Strictness — non-negotiable per CodingStandards.md */
     "strict": true,
