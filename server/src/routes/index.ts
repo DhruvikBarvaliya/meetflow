@@ -62,6 +62,7 @@ import { memberInvitesRouter, membersRouter } from '../modules/members/members.r
 import { resourcesRouter } from '../modules/resources/resources.routes';
 import { servicesRouter } from '../modules/services/services.routes';
 import { publicBookingRouter } from '../modules/publicBooking/publicBooking.routes';
+import { publicWaitlistRouter } from '../modules/waitlist/publicWaitlist.routes';
 import { staffRouter } from '../modules/staff/staff.routes';
 import { teamsRouter } from '../modules/teams/teams.routes';
 import { waitlistRouter } from '../modules/waitlist/waitlist.routes';
@@ -155,6 +156,12 @@ apiRouter.use(memberInvitesRouter);
 
 // --- 3. Public booking surface --------------------------------------------
 publicRouter.use(publicBookingRouter);
+// Claiming a waitlist offer belongs here rather than on the management surface:
+// the person clicking the link in the offer email is a customer who may have no
+// account at all, and they are addressed — as everywhere on this surface — by an
+// opaque handle rather than by a row id. Unmounted, the link in every offer
+// email leads nowhere, which is exactly what it did before this line existed.
+publicRouter.use(publicWaitlistRouter);
 // Terminator: an unknown public path must 404 here rather than falling through
 // into the authenticated chain below and answering a misleading 401.
 publicRouter.use(notFoundHandler);

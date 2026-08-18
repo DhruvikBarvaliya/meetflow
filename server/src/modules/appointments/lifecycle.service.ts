@@ -823,8 +823,76 @@ export async function rescheduleAppointment(input: RescheduleInput): Promise<App
     );
   }
 
+  // The *original* window, not the new one. A move hands back the time it left
+  // as surely as a cancellation does, and that time is the one somebody may be
+  // waiting for — offering the slot it moved *into* would be offering a slot
+  // that is now occupied.
+  offerFreedSlot(updated, {
+    startsAt: previous.startsAt,
+    endsAt: previous.endsAt,
+    staffProfileId: previous.staffProfileId,
+    reason: 'rescheduled away',
+  });
+
   log.info({ appointmentId: updated.id, to: updated.startsAt }, 'appointment rescheduled');
   return updated;
+}
+
+// ---------------------------------------------------------------------------
+// Freeing a slot
+// ---------------------------------------------------------------------------
+
+/** The window a transition just handed back, and why. */
+interface FreedSlot {
+  startsAt: Date;
+  endsAt: Date;
+  staffProfileId: string | null;
+  reason: 'cancelled' | 'rejected' | 'rescheduled away';
+}
+
+/**
+ * Offers a window that has just come free to whoever is waiting for it.
+ *
+ * Three transitions free a slot and all three must reach the waitlist: a
+ * cancellation, a rejection, and a reschedule — which frees its *original*
+ * time, not its new one. Only cancellation used to call the matcher, so a
+ * customer waiting on a slot that a business rejected or moved away from was
+ * never told it had opened, and the entry sat ACTIVE until something else
+ * happened to free the same minute. Routing all three through one function is
+ * what stops the fourth from being forgotten.
+ *
+ * Deliberately fire-and-forget, and deliberately after the commit. The
+ * transition the caller asked for has already succeeded; an offer that fails to
+ * send must not turn a completed cancellation into an error the customer sees.
+ * A failure is logged and the entry stays ACTIVE, so the next opening picks it
+ * up.
+ */
+function offerFreedSlot(appointment: Appointment, slot: FreedSlot): void {
+  // Without a provider there is no diary the opening belongs to, and the
+  // matcher has nothing to match against.
+  if (!slot.staffProfileId) return;
+
+  void evaluateWaitlistForSlot({
+    businessId: appointment.businessId,
+    serviceId: appointment.serviceId,
+    staffProfileId: slot.staffProfileId,
+    startsAt: slot.startsAt,
+    endsAt: slot.endsAt,
+  })
+    .then((entry) => {
+      if (entry) {
+        log.info(
+          { appointmentId: appointment.id, waitlistEntryId: entry.id, freed: slot.reason },
+          'freed slot offered to a waitlisted customer',
+        );
+      }
+    })
+    .catch((error: unknown) => {
+      log.error(
+        { err: error, appointmentId: appointment.id, freed: slot.reason },
+        'waitlist evaluation failed for a freed slot',
+      );
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1018,34 +1086,13 @@ export async function cancelAppointment(input: CancelInput): Promise<Appointment
     reason: 'appointment.cancelled',
   });
 
-  // A cancellation is the main way a slot frees up, so this is where the
-  // waitlist gets its chance. Deliberately after the commit and deliberately
-  // not awaited into the caller's result: the customer's cancellation has
-  // already succeeded, and an offer that fails to send must not turn it into an
-  // error. Failures are logged; the entry stays ACTIVE and is picked up by the
-  // next opening.
-  if (result.fullyCancelled && result.appointment.staffProfileId) {
-    void evaluateWaitlistForSlot({
-      businessId: result.appointment.businessId,
-      serviceId: result.appointment.serviceId,
-      staffProfileId: result.appointment.staffProfileId,
+  if (result.fullyCancelled) {
+    offerFreedSlot(result.appointment, {
       startsAt: result.appointment.startsAt,
       endsAt: result.appointment.endsAt,
-    })
-      .then((entry) => {
-        if (entry) {
-          log.info(
-            { appointmentId: result.appointment.id, waitlistEntryId: entry.id },
-            'freed slot offered to a waitlisted customer',
-          );
-        }
-      })
-      .catch((error: unknown) => {
-        log.error(
-          { err: error, appointmentId: result.appointment.id },
-          'waitlist evaluation failed for a freed slot',
-        );
-      });
+      staffProfileId: result.appointment.staffProfileId,
+      reason: 'cancelled',
+    });
   }
 
   log.info(
@@ -1213,6 +1260,16 @@ export async function rejectAppointment(input: TransitionInput): Promise<Appoint
       dedupeKey: `rejected:${updated.id}`,
     });
   }
+
+  // A rejection frees the slot exactly as a cancellation does — the business
+  // declined it rather than the customer, but the diary does not care which.
+  offerFreedSlot(updated, {
+    startsAt: updated.startsAt,
+    endsAt: updated.endsAt,
+    staffProfileId: updated.staffProfileId,
+    reason: 'rejected',
+  });
+
   return updated;
 }
 
