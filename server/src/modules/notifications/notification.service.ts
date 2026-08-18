@@ -9,13 +9,23 @@
  *     notification row rolls back with it;
  *   - a booking that commits always sends one, because a periodic sweep picks
  *     up any row whose enqueue was lost.
+ *
+ * The same commit boundary governs the realtime hint: `notification.created` is
+ * published from here, after the row is durable, so every producer announces
+ * its message without any of them having to remember to.
  */
 import { Op, type Transaction } from 'sequelize';
 import { sequelize } from '../../config/database';
 import { env } from '../../config/env';
 import { createLogger } from '../../config/logger';
-import { Notification, NotificationTemplate } from '../../database/models';
+import {
+  Membership,
+  Notification,
+  NotificationTemplate,
+  StaffProfile,
+} from '../../database/models';
 import { JOB_NAMES, notificationQueue, safeEnqueue } from '../../jobs/queues';
+import { Rooms, SocketEvents, emitRealtime } from '../../sockets';
 import { sha256 } from '../../utils/ids';
 import {
   DEFAULT_TEMPLATES,
@@ -83,7 +93,64 @@ async function resolveTemplate(
 }
 
 /**
- * Writes one outbox row and schedules delivery.
+ * The rooms one outbox row may be announced in.
+ *
+ * Derived from live membership rows, exactly as the socket layer derives them
+ * at connection time — never from anything a client asked for. A recipient with
+ * a staff profile has a personal room and is told there and only there; a
+ * member without one (a receptionist, an owner who takes no appointments) is
+ * only ever in the workspace room, so that is where their message is announced.
+ * The payload is an id and a type — never the subject, the body or the address
+ * — so the second case tells a colleague that a message exists without telling
+ * them whose it is or what it says.
+ *
+ * Rows addressed to a customer announce nothing: a customer holds no socket
+ * (the `customer:` room is reserved for a portal that does not connect yet),
+ * and an account email such as a password reset belongs to no workspace at all.
+ * An INVITED or REMOVED member is in no room either, which is why the
+ * membership lookup filters on ACTIVE — the same predicate the handshake uses.
+ */
+async function recipientRooms(row: Notification): Promise<string[]> {
+  const businessId = row.businessId;
+  const userId = row.recipientUserId;
+  if (!businessId || !userId) return [];
+
+  const membership = await Membership.findOne({
+    where: { userId, businessId, status: 'ACTIVE' },
+    attributes: ['id'],
+  });
+  if (!membership) return [];
+
+  const profiles = await StaffProfile.findAll({
+    where: { membershipId: membership.id },
+    attributes: ['id'],
+  });
+  return profiles.length > 0
+    ? profiles.map((profile) => Rooms.staff(profile.id))
+    : [Rooms.workspace(businessId)];
+}
+
+/**
+ * Publishes `notification.created` for a row that is already committed.
+ *
+ * Swallows its own failures. The message is durable by the time this runs and
+ * the delivery worker does not depend on it, so a realtime hint that could not
+ * be worked out must not surface as an error on a booking that has succeeded.
+ */
+async function announceNotification(row: Notification): Promise<void> {
+  try {
+    const rooms = await recipientRooms(row);
+    emitRealtime(rooms, SocketEvents.notificationCreated, {
+      notificationId: row.id,
+      type: row.type,
+    });
+  } catch (error) {
+    log.warn({ err: error, notificationId: row.id }, 'could not announce a queued notification');
+  }
+}
+
+/**
+ * Writes one outbox row, schedules delivery and announces it.
  *
  * Returns null when the dedupe key already exists — a duplicate is a success
  * from the caller's point of view, not an error.
@@ -161,7 +228,7 @@ export async function enqueueNotification(
   }
 
   const delay = Math.max(0, scheduledFor.getTime() - Date.now());
-  const schedule = () =>
+  const dispatch = (): void => {
     void safeEnqueue(
       notificationQueue,
       JOB_NAMES.deliverNotification,
@@ -170,13 +237,21 @@ export async function enqueueNotification(
       // second delivery job for the same notification.
       { delay, jobId: `notification:${row.id}` },
     );
+    // The realtime hint travels with the delivery job, and for the same reason:
+    // before the commit the row is visible to nobody, so telling a client to
+    // refetch would point it at something that is not there yet — or, if the
+    // transaction rolls back, at something that never will be. A reminder is
+    // announced now rather than when it is due, which is truthful: the row
+    // exists from this moment, and its `scheduledFor` says when it goes out.
+    void announceNotification(row);
+  };
 
   if (options.transaction) {
-    // Only schedule once the row is actually committed and visible to the
+    // Only dispatch once the row is actually committed and visible to the
     // worker — otherwise the job can win the race and find nothing.
-    options.transaction.afterCommit(schedule);
+    options.transaction.afterCommit(dispatch);
   } else {
-    schedule();
+    dispatch();
   }
 
   return row;

@@ -69,6 +69,7 @@ import { enqueueNotification } from '../notifications/notification.service';
 import { evaluateWaitlistForSlot } from '../waitlist/waitlist.matcher';
 import { publishAppointmentWebhook } from '../webhooks/webhooks.service';
 import { WebhookEvents, type WebhookEvent } from '../webhooks/webhooks.validation';
+import { FOLLOW_UP_DELAY_MINUTES } from './booking.service';
 
 const log = createLogger('lifecycle');
 
@@ -207,6 +208,65 @@ async function buildPayload(
       reason: appointment.cancellationReason ?? '',
     },
   };
+}
+
+/**
+ * Tells a provider that something already in their diary has changed.
+ *
+ * The mirror image of `STAFF_ASSIGNED`, which only ever covers an appointment
+ * arriving. Both sides of a reassignment are worth a message: the person
+ * picking the appointment up needs to know it is theirs, and the person losing
+ * it needs to know it is not — a provider who is never told still has it
+ * written down.
+ *
+ * The user behind the profile is looked up rather than assumed: a staff profile
+ * can exist without a login (a contractor the workspace books on behalf of),
+ * and there is nowhere to write to for one that has none.
+ *
+ * Times are rendered in the provider's own timezone, not the customer's.
+ * `buildPayload` builds `startsAtLocal` for the customer, which is right for
+ * every message in this file except this one — a provider reading "Now: 14:00"
+ * about a colleague's clinic in another country would put it in the wrong slot.
+ */
+async function notifyScheduleChange(
+  input: {
+    appointment: Appointment;
+    staffProfileId: string;
+    payload: Record<string, unknown>;
+    changeSummary: string;
+    fallbackZone: string;
+    dedupeKey: string;
+  },
+  transaction: Transaction,
+): Promise<void> {
+  const profile = await StaffProfile.findByPk(input.staffProfileId, {
+    include: [{ association: 'user', attributes: ['id', 'email'] }],
+    transaction,
+  });
+  const user = profile?.get('user') as { id: string; email: string } | undefined;
+  if (!profile || !user?.email) return;
+
+  const zone = profile.timezone || input.fallbackZone;
+
+  await enqueueNotification(
+    {
+      businessId: input.appointment.businessId,
+      type: 'STAFF_SCHEDULE_CHANGED',
+      recipientType: 'STAFF',
+      recipientUserId: user.id,
+      recipientAddress: user.email,
+      appointmentId: input.appointment.id,
+      payload: {
+        ...input.payload,
+        staffName: profile.displayName,
+        startsAtLocal: formatForHumans(input.appointment.startsAt, zone),
+        timezone: zone,
+        changeSummary: input.changeSummary,
+      },
+      dedupeKey: input.dedupeKey,
+    },
+    { transaction },
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -643,6 +703,62 @@ export async function rescheduleAppointment(input: RescheduleInput): Promise<App
           { transaction },
         );
       }
+
+      // The follow-up was withdrawn along with the reminders and has to come
+      // back against the new end time, for the same reason and with the same
+      // key discipline: the booking-time key now belongs to the row just
+      // cancelled, and reusing it would read as "already queued" and leave the
+      // customer with no follow-up at all.
+      const followUpAt = addMinutes(endsAt, FOLLOW_UP_DELAY_MINUTES);
+      if (followUpAt.getTime() > Date.now()) {
+        await enqueueNotification(
+          {
+            businessId: appointment.businessId,
+            type: 'APPOINTMENT_FOLLOW_UP',
+            recipientType: 'CUSTOMER',
+            recipientCustomerId: customer.id,
+            recipientAddress: customer.email,
+            appointmentId: appointment.id,
+            payload,
+            scheduledFor: followUpAt,
+            dedupeKey: `follow-up:${appointment.id}:${customer.id}:r${appointment.rescheduleCount}`,
+          },
+          { transaction },
+        );
+      }
+    }
+
+    // The providers on either side of the move. A reassignment produces two
+    // messages — one to the person picking the appointment up, one to the
+    // person putting it down — and a plain time change produces one.
+    const reassigned = previous.staffProfileId !== targetStaffId;
+    await notifyScheduleChange(
+      {
+        appointment,
+        staffProfileId: targetStaffId,
+        payload,
+        changeSummary: reassigned
+          ? `Assigned to you, previously ${formatForHumans(previous.startsAt, business.timezone)} with another provider.`
+          : `Moved from ${formatForHumans(previous.startsAt, business.timezone)}.`,
+        fallbackZone: business.timezone,
+        // The counter distinguishes every move, so a second reschedule is a
+        // second message rather than a duplicate the outbox swallows.
+        dedupeKey: `schedule-changed:${appointment.id}:${targetStaffId}:r${appointment.rescheduleCount}`,
+      },
+      transaction,
+    );
+    if (reassigned && previous.staffProfileId) {
+      await notifyScheduleChange(
+        {
+          appointment,
+          staffProfileId: previous.staffProfileId,
+          payload,
+          changeSummary: 'Reassigned to another provider and removed from your schedule.',
+          fallbackZone: business.timezone,
+          dedupeKey: `schedule-changed:${appointment.id}:${previous.staffProfileId}:r${appointment.rescheduleCount}`,
+        },
+        transaction,
+      );
     }
 
     // Inside the transaction, like the outbox rows above and for the same
@@ -673,6 +789,27 @@ export async function rescheduleAppointment(input: RescheduleInput): Promise<App
       staffProfileId: updated.staffProfileId,
     },
   );
+  // A reassignment is the second way a provider acquires an appointment, and
+  // the only one that also takes it away from somebody else — so it carries
+  // both ids, and the losing provider hears about it separately below.
+  if (updated.staffProfileId && previous.staffProfileId !== updated.staffProfileId) {
+    emitAppointmentEvent(
+      SocketEvents.staffAssigned,
+      {
+        businessId: updated.businessId,
+        staffProfileId: updated.staffProfileId,
+        appointmentId: updated.id,
+      },
+      {
+        appointmentId: updated.id,
+        publicId: updated.publicId,
+        staffProfileId: updated.staffProfileId,
+        previousStaffProfileId: previous.staffProfileId,
+        startsAt: updated.startsAt,
+        endsAt: updated.endsAt,
+      },
+    );
+  }
   // The provider losing the slot needs to know too, when the move reassigned it.
   if (previous.staffProfileId && previous.staffProfileId !== updated.staffProfileId) {
     emitAppointmentEvent(
@@ -942,6 +1079,17 @@ async function transition(
    * five appointment events rather than "whatever the state machine does".
    */
   webhookEvent?: WebhookEvent,
+  /**
+   * Messages this transition causes, written inside its transaction.
+   *
+   * The outbox rule is that a notification row is inserted with the change that
+   * caused it: a transition that rolls back must not leave a message telling a
+   * customer something that never happened, and one that commits must not lose
+   * its message to a crash before the enqueue. A transition owns its own
+   * transaction, so from the outside there is no way to honour that rule —
+   * which is what this hook is for.
+   */
+  queueMessages?: (appointment: Appointment, transaction: Transaction) => Promise<void>,
 ): Promise<Appointment> {
   const updated = await sequelize.transaction(async (transaction) => {
     const appointment = await loadAppointment(
@@ -988,6 +1136,8 @@ async function transition(
       },
       { transaction },
     );
+
+    if (queueMessages) await queueMessages(appointment, transaction);
 
     // Inside the transaction with the status change it announces; the socket
     // emission below is deliberately outside it, because a real-time nudge that
@@ -1113,6 +1263,11 @@ export async function completeAppointment(input: TransitionInput): Promise<Appoi
  *
  * Guarded by the configured grace period: a customer who is five minutes late
  * has not failed to attend, and marking them absent affects their record.
+ *
+ * The customer is told, in the same transaction as the marking. This is the one
+ * lifecycle message where silence is worse than the message: their no-show
+ * count went up, a workspace may price that in, and "we missed you — book
+ * another time" is both the courtesy and the recovery.
  */
 export async function markNoShow(input: TransitionInput): Promise<Appointment> {
   const appointment = await loadAppointment(input.businessId, input.appointmentId);
@@ -1136,6 +1291,26 @@ export async function markNoShow(input: TransitionInput): Promise<Appointment> {
     AuditActions.APPOINTMENT_NO_SHOW,
     SocketEvents.appointmentNoShow,
     WebhookEvents.APPOINTMENT_NO_SHOW,
+    async (marked, transaction) => {
+      const { payload, customer } = await buildPayload(marked, transaction);
+      // A walk-in booked without a customer record has nobody to write to.
+      if (!customer) return;
+      await enqueueNotification(
+        {
+          businessId: marked.businessId,
+          type: 'APPOINTMENT_NO_SHOW',
+          recipientType: 'CUSTOMER',
+          recipientCustomerId: customer.id,
+          recipientAddress: customer.email,
+          appointmentId: marked.id,
+          payload,
+          // NO_SHOW is terminal, so this can only be reached once per
+          // appointment; the key makes a retried request say so too.
+          dedupeKey: `no-show:${marked.id}:${customer.id}`,
+        },
+        { transaction },
+      );
+    },
   );
 
   if (updated.customerId) {

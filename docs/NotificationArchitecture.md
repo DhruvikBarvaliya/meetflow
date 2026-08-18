@@ -35,22 +35,55 @@ correct. Offsets come from `business_settings.reminder_offsets_minutes`
 (default 24h and 1h before); offsets that would already be in the past at
 booking time are skipped rather than sent immediately.
 
+The follow-up is the same idea pointing the other way: queued at booking time,
+scheduled for a day after the appointment ends. Queuing it up front is what
+makes it withdrawable — a message that only exists once the visit is over can
+never be called back if the visit does not happen.
+
 Cancelling an appointment flips its pending `APPOINTMENT_REMINDER` and
 `APPOINTMENT_FOLLOW_UP` rows to `CANCELLED`, so a reminder never goes out for an
-appointment that is no longer happening.
+appointment that is no longer happening, and nobody is thanked for a visit they
+never made. Completion withdraws only the reminder: the follow-up is meant to
+arrive afterwards. A reschedule withdraws both and re-queues both against the
+new time.
+
+## The one message with no change behind it
+
+Every other notification is caused by something a person did, so it is written
+in that change's transaction. The owner's daily digest has no such moment: it is
+caused by a clock, and by a different clock in every workspace.
+
+It is produced by an hourly job that asks PostgreSQL which workspaces are
+currently inside their local digest hour (07:00), rather than by a timer per
+workspace. Sending twice is prevented the same way everything else here prevents
+it — a dedupe key of workspace plus **local** date — so a job that overlaps its
+own hour, or a worker that restarts inside it, writes nothing the second time. A
+workspace with an empty day gets no digest at all: "here is your day: 0
+appointments" is how an owner learns to ignore the ones that matter.
 
 ## Idempotency
 
 Every enqueue may carry a `dedupe_key`, backed by a unique index:
 
-| Notification               | Key                                                   |
-| -------------------------- | ----------------------------------------------------- |
-| Booking confirmation       | `confirm:{appointmentId}:{customerId}`                |
-| Reminder                   | `remind:{appointmentId}:{customerId}:{offsetMinutes}` |
-| Reschedule                 | `reschedule:{appointmentId}:{newStartsAt}`            |
-| Cancellation               | `cancel:{appointmentId}`                              |
-| Staff assignment           | `staff-assigned:{appointmentId}:{userId}`             |
-| Email verification / reset | `verify:{sha256(token)}` / `reset:{sha256(token)}`    |
+| Notification               | Key                                                      |
+| -------------------------- | -------------------------------------------------------- |
+| Booking confirmation       | `confirm:{appointmentId}:{customerId}`                   |
+| Reminder                   | `remind:{appointmentId}:{customerId}:{offsetMinutes}`    |
+| Follow-up                  | `follow-up:{appointmentId}:{customerId}`                 |
+| Customer welcome           | `welcome:{customerId}`                                   |
+| Reschedule                 | `reschedule:{appointmentId}:{newStartsAt}`               |
+| Cancellation               | `cancel:{appointmentId}`                                 |
+| No-show                    | `no-show:{appointmentId}:{customerId}`                   |
+| Staff assignment           | `staff-assigned:{appointmentId}:{userId}`                |
+| Staff schedule changed     | `schedule-changed:{appointmentId}:{staffProfileId}:r{n}` |
+| Owner new booking          | `owner-new-booking:{appointmentId}:{customerId}`         |
+| Owner daily digest         | `digest:{businessId}:{localDate}`                        |
+| Email verification / reset | `verify:{sha256(token)}` / `reset:{sha256(token)}`       |
+
+A reschedule appends `:r{n}` — the appointment's reschedule counter — to the
+reminder and follow-up keys it re-queues. The booking-time key belongs to the
+row the move just cancelled, and reusing it would be read as "already queued",
+leaving the customer with no reminder at all.
 
 A duplicate insert is caught and treated as success — the message is already
 queued.

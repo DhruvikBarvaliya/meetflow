@@ -527,6 +527,13 @@ function parseQuestions(link: BookingLink): CustomQuestion[] {
 // Published configuration
 // ---------------------------------------------------------------------------
 
+/**
+ * `requireApproval` is the two outer layers of the approval rule already ORed
+ * together — the workspace setting and this link's flag. The service's own flag
+ * is the third, and the page must advertise the same OR the booking path
+ * applies at commit, or it promises instant confirmation and then hands back a
+ * PENDING appointment.
+ */
 function toServiceSummary(service: Service, requireApproval: boolean): PublicServiceSummary {
   return {
     id: service.id,
@@ -536,8 +543,6 @@ function toServiceSummary(service: Service, requireApproval: boolean): PublicSer
     priceAmount: service.priceAmount,
     currency: service.currency,
     capacity: service.capacity,
-    // The workspace-wide switch and the per-service one both force review, so
-    // the page must advertise the same OR the booking path applies.
     requiresApproval: service.requiresApproval || requireApproval,
   };
 }
@@ -570,6 +575,11 @@ async function buildConfig(link: BookingLink, business: Business): Promise<Publi
     settingsFor(business.id),
   ]);
 
+  // Every layer that can ask for review, ORed the way the booking path ORs
+  // them. Held in one binding so the service cards and the policy block below
+  // cannot drift apart from each other.
+  const requiresApproval = settings.requireApproval || link.requiresApproval;
+
   return {
     link: {
       slug: link.slug,
@@ -591,7 +601,7 @@ async function buildConfig(link: BookingLink, business: Business): Promise<Publi
       supportEmail: business.supportEmail,
       supportPhone: business.supportPhone,
     },
-    services: services.map((service) => toServiceSummary(service, settings.requireApproval)),
+    services: services.map((service) => toServiceSummary(service, requiresApproval)),
     locations: locations.map(toLocationSummary),
     staff: staff.map(toStaffSummary),
     questions: parseQuestions(link),
@@ -604,7 +614,7 @@ async function buildConfig(link: BookingLink, business: Business): Promise<Publi
       maxReschedulesPerAppointment: settings.maxReschedulesPerAppointment,
       allowCustomerCancel: settings.allowCustomerCancel,
       allowCustomerReschedule: settings.allowCustomerReschedule,
-      requiresApproval: settings.requireApproval,
+      requiresApproval,
     },
   };
 }
@@ -725,7 +735,10 @@ export async function searchPublicAvailability(
       capacity: result.policy.capacity,
       minNoticeMinutes: result.policy.minNoticeMinutes,
       maxHorizonDays: result.policy.maxHorizonDays,
-      requiresApproval: result.policy.requiresApproval,
+      // The effective policy covers the service and the workspace; the link's
+      // own flag is the layer it does not model, and it is ORed here exactly as
+      // the booking path ORs it at commit.
+      requiresApproval: result.policy.requiresApproval || resolved.link.requiresApproval,
     },
   };
 }

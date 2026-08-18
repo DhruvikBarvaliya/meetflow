@@ -105,6 +105,25 @@ export const logoutAll = asyncHandler(async (req: Request, res: Response) => {
   sendSuccess(res, { sessionsRevoked: revoked });
 });
 
+/**
+ * The user, the workspaces they belong to, and — when one of them has been
+ * resolved for this request — what they may actually do in it.
+ *
+ * `activeWorkspace.permissions` is the server's own effective set: the role's
+ * grants with per-member GRANT and DENY overrides already applied, by the same
+ * `resolveEffectivePermissions` every `requirePermission` check runs through.
+ * That makes this endpoint authoritative for what the UI shows, and it is meant
+ * to be: any table the client keeps of its own is a second answer that can
+ * disagree with the first, and a client-side copy of the role catalogue cannot
+ * see overrides at all — so it would show a member controls the server will
+ * refuse, and hide ones it would allow. The mirror in the client is redundant
+ * from here and is due for deletion.
+ *
+ * Null is a real answer, not a failure: the route resolves tenant context
+ * optionally, so a user with no membership — or one who belongs to several and
+ * has not named which — gets their memberships back and nothing more. That list
+ * is how a client learns which id to send as `X-Business-Id`.
+ */
 export const me = asyncHandler(async (req: Request, res: Response) => {
   if (!req.auth) throw new UnauthenticatedError();
   const memberships = await authService.listMemberships(req.auth.userId);
@@ -115,7 +134,6 @@ export const me = asyncHandler(async (req: Request, res: Response) => {
       platformRole: req.auth.platformRole,
     },
     memberships,
-    // Present only once a workspace has been selected for this request.
     activeWorkspace: req.tenant
       ? {
           businessId: req.tenant.businessId,

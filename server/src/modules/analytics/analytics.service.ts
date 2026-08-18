@@ -131,21 +131,66 @@ const SCOPED_CTE = `
 const OCCUPIED_SQL = `status NOT IN ('CANCELLED', 'REJECTED')`;
 
 /**
- * Minutes of a merged set of weekly windows.
+ * A wall-clock minute-of-day on one calendar day, as an instant.
  *
- * `range_agg` unions the windows before they are measured, so a staff member
- * covered by both an any-location rule and a rule for the branch being filtered
- * is not credited with the same hour twice. Summing the rows directly would
- * inflate every denominator it touched and quietly depress utilisation.
+ * Rosters and opening hours are stored as minutes past local midnight, and a
+ * denominator has to be measured against absolute time before leave and
+ * blackouts — which are instants — can be taken out of it. `AT TIME ZONE` is
+ * also what makes the two short and long days of the year come out right: a
+ * 09:00–17:00 rota is eight hours on most days and seven on the day the clocks
+ * go forward, and only PostgreSQL knows which day that is for this zone.
+ *
+ * Every argument is literal SQL written in this file. Nothing a client sends
+ * reaches it — `zone` is either the `$tz` bind or a column, never a value.
  */
-const MERGE_WINDOWS_SQL = `
-    SELECT owner_id, SUM(upper(segment) - lower(segment))::bigint AS minutes
+function wallClock(dayExpr: string, minuteExpr: string, zone = '$tz::text'): string {
+  return `((${dayExpr}) + make_interval(mins => ${minuteExpr})) AT TIME ZONE ${zone}`;
+}
+
+/** One whole calendar day as an instant range, in the same zone as its windows. */
+function wholeDay(dayExpr: string, zone = '$tz::text'): string {
+  return `tstzrange(${wallClock(dayExpr, '0', zone)}, ${wallClock(dayExpr, '1440', zone)})`;
+}
+
+/**
+ * Minutes a set of windows is worth once unavailability has been taken out.
+ *
+ * Both callers build two CTEs of this exact shape — `windows`, the time the
+ * rota or the opening hours offer, and `unavailable`, the time leave, holidays
+ * and blackouts take back — each keyed by `owner_id` and carrying one
+ * `tstzrange`. Both sides are unioned by `range_agg` before they meet, which is
+ * what makes the arithmetic idempotent in both directions: a staff member
+ * covered by both an any-location rule and a rule for the branch being filtered
+ * is not credited with the same hour twice, and an absence recorded twice —
+ * leave booked as an override *and* as a blackout, which is exactly what a
+ * careful administrator does — does not subtract it twice either. Summing the
+ * rows directly would get both wrong, inflating one denominator and hollowing
+ * out the other.
+ *
+ * An owner whose windows are entirely eaten drops out of the result rather than
+ * appearing as 0; the outer LEFT JOIN turns the absence back into 0, and
+ * `NULLIF` keeps the rate at 0 instead of dividing by it.
+ */
+const NET_WINDOW_MINUTES_SQL = `
+    SELECT net.owner_id,
+           (SUM(EXTRACT(EPOCH FROM (upper(segment) - lower(segment)))) / 60)::bigint AS minutes
     FROM (
-      SELECT owner_id, bucket, range_agg(window_range) AS spans
-      FROM windows
-      GROUP BY owner_id, bucket
-    ) merged, unnest(merged.spans) AS segment
-    GROUP BY owner_id`;
+      SELECT rostered.owner_id,
+             rostered.spans - COALESCE(absent.spans, '{}'::tstzmultirange) AS spans
+      FROM (
+        SELECT owner_id, range_agg(span) AS spans
+        FROM windows
+        WHERE NOT isempty(span)
+        GROUP BY owner_id
+      ) rostered
+      LEFT JOIN (
+        SELECT owner_id, range_agg(span) AS spans
+        FROM unavailable
+        WHERE NOT isempty(span)
+        GROUP BY owner_id
+      ) absent ON absent.owner_id = rostered.owner_id
+    ) net, unnest(net.spans) AS segment
+    GROUP BY net.owner_id`;
 
 // ---------------------------------------------------------------------------
 // Overview
@@ -381,13 +426,35 @@ interface StaffRow {
 }
 
 /**
- * Utilisation is booked minutes over rostered minutes.
+ * Utilisation is booked minutes over the minutes the provider was actually
+ * available to be booked.
  *
- * The denominator is rebuilt from the weekly availability rules that were in
- * force on each day of the window — `effective_from`/`effective_to` are what
- * make a rota change mid-period come out right instead of retroactively
- * rewriting last month's utilisation. A rule with no location applies wherever
- * the member works, so it survives a location filter.
+ * The denominator starts as the weekly availability rules that were in force on
+ * each day of the window — `effective_from`/`effective_to` are what make a rota
+ * change mid-period come out right instead of retroactively rewriting last
+ * month's utilisation. A rule with no location applies wherever the member
+ * works, so it survives a location filter.
+ *
+ * The rota on its own is not availability, though, and treating it as such is
+ * how this figure used to lie: a provider on a week's approved leave still
+ * counted as fully rostered, so their utilisation read close to zero and the
+ * report suggested idleness where there was absence. Three sources of genuine
+ * unavailability are therefore subtracted, all of them the same rows the
+ * scheduling engine refuses to sell against:
+ *
+ *   - **leave and other date exceptions** — `availability_overrides` with
+ *     `is_available = false`, at STAFF scope for this provider and at BUSINESS
+ *     or LOCATION scope for the site they work at, since a closed branch takes
+ *     everybody with it;
+ *   - **holidays that close the business**, workspace-wide (`location_id IS
+ *     NULL`) or scoped to that site, including the recurring ones matched on
+ *     month and day;
+ *   - **blackout periods** overlapping the window, at BUSINESS, STAFF or
+ *     LOCATION scope.
+ *
+ * The site is `COALESCE($locationId, staff_profiles.default_location_id)`,
+ * which is how booking and the availability search resolve it too — anything
+ * else would scope holidays to a branch nobody is being booked into.
  *
  * Staff with no appointments still appear, at 0%: an idle provider is the single
  * most interesting row on this report, and an inner join would hide them.
@@ -409,8 +476,8 @@ const STAFF_SQL = `
   windows AS (
     SELECT
       r.staff_profile_id                          AS owner_id,
-      d.bucket                                    AS bucket,
-      int4range(r.start_minute, r.end_minute)     AS window_range
+      tstzrange(${wallClock('d.bucket', 'r.start_minute')},
+                ${wallClock('d.bucket', 'r.end_minute')}) AS span
     FROM days d
     JOIN staff_availability_rules r
       ON r.business_id = $businessId
@@ -421,7 +488,66 @@ const STAFF_SQL = `
      AND ($locationId::uuid IS NULL OR r.location_id IS NULL OR r.location_id = $locationId::uuid)
      AND ($staffProfileId::uuid IS NULL OR r.staff_profile_id = $staffProfileId::uuid)
   ),
-  working AS (${MERGE_WINDOWS_SQL}
+  -- The branch each provider's day is read at, resolved exactly as booking
+  -- resolves it: the filtered location when there is one, otherwise the
+  -- provider's own default. A closure at another branch must not reach them.
+  staff_scope AS (
+    SELECT sp.id                                               AS staff_profile_id,
+           COALESCE($locationId::uuid, sp.default_location_id) AS location_id
+    FROM staff_profiles sp
+    WHERE sp.business_id = $businessId
+      AND ($staffProfileId::uuid IS NULL OR sp.id = $staffProfileId::uuid)
+  ),
+  unavailable AS (
+    SELECT ss.staff_profile_id AS owner_id, ${wholeDay('d.bucket')} AS span
+    FROM days d
+    CROSS JOIN staff_scope ss
+    JOIN holidays h
+      ON h.business_id = $businessId
+     AND h.is_active
+     AND h.closes_business
+     AND (h.location_id IS NULL OR h.location_id = ss.location_id)
+     AND CASE WHEN h.is_recurring_annually
+              -- A recurring holiday records the first year it was observed and
+              -- matches on month and day in every year after it.
+              THEN to_char(h.date, 'MM-DD') = to_char(d.bucket, 'MM-DD')
+              ELSE h.date = d.bucket
+         END
+    UNION ALL
+    -- A removal with no window at all is a whole day gone — leave, sickness, an
+    -- unscheduled closure — which is why the minute columns fall back to the
+    -- full day here, exactly as \`applyOverrides\` reads them.
+    SELECT ss.staff_profile_id,
+           tstzrange(${wallClock('d.bucket', 'COALESCE(o.start_minute, 0)')},
+                     ${wallClock('d.bucket', 'COALESCE(o.end_minute, 1440)')})
+    FROM days d
+    CROSS JOIN staff_scope ss
+    JOIN availability_overrides o
+      ON o.business_id = $businessId
+     AND NOT o.is_available
+     AND o.date = d.bucket
+     AND (
+       (o.scope = 'STAFF' AND o.staff_profile_id = ss.staff_profile_id)
+       OR o.scope = 'BUSINESS'
+       OR (o.scope = 'LOCATION' AND o.location_id = ss.location_id)
+     )
+    UNION ALL
+    -- Blackouts are absolute instants already, so nothing has to be resolved.
+    -- The bounds test is what keeps the scan off a workspace's whole history.
+    SELECT ss.staff_profile_id, tstzrange(bp.starts_at, bp.ends_at)
+    FROM staff_scope ss
+    CROSS JOIN bounds b
+    JOIN blackout_periods bp
+      ON bp.business_id = $businessId
+     AND bp.starts_at < b.to_ts
+     AND bp.ends_at   > b.from_ts
+     AND (
+       bp.scope = 'BUSINESS'
+       OR (bp.scope = 'STAFF' AND bp.staff_profile_id = ss.staff_profile_id)
+       OR (bp.scope = 'LOCATION' AND bp.location_id = ss.location_id)
+     )
+  ),
+  working AS (${NET_WINDOW_MINUTES_SQL}
   )
   SELECT
     sp.id                                    AS staff_profile_id,
@@ -557,12 +683,21 @@ interface LocationRow {
 }
 
 /**
- * A location's denominator is its opening hours.
+ * A location's denominator is the hours it was genuinely open.
  *
  * business_hours rows carrying a `location_id` replace the workspace-wide rows
  * for that branch entirely rather than adding to them — that is the rule the
  * availability engine follows, and utilisation has to divide by the same hours
- * the engine was willing to sell.
+ * the engine was willing to sell. Days the branch was shut are then taken back
+ * out, from the same three sources as the staff report: holidays it observes,
+ * BUSINESS- and LOCATION-scoped overrides that remove time, and blackouts.
+ * STAFF-scoped rows are deliberately absent — one provider's leave does not
+ * close a site, and counting it as though it did would credit a branch with
+ * being shut every time somebody took a day off.
+ *
+ * Wall-clock minutes are resolved in the branch's own timezone rather than the
+ * workspace's, because that is the zone its opening hours were authored in;
+ * `locations.timezone` exists for exactly this reason.
  *
  * Appointments with no location (a virtual booking, say) are absent from this
  * breakdown by construction: they belong to no branch's day.
@@ -583,12 +718,19 @@ const LOCATIONS_SQL = `
     FROM business_hours
     WHERE business_id = $businessId AND is_active AND location_id IS NOT NULL
   ),
+  branches AS (
+    SELECT l.id, l.timezone
+    FROM locations l
+    WHERE l.business_id = $businessId
+      AND l.deleted_at IS NULL
+      AND ($locationId::uuid IS NULL OR l.id = $locationId::uuid)
+  ),
   windows AS (
     SELECT
       l.id                                     AS owner_id,
-      d.bucket                                 AS bucket,
-      int4range(h.start_minute, h.end_minute)  AS window_range
-    FROM locations l
+      tstzrange(${wallClock('d.bucket', 'h.start_minute', 'l.timezone')},
+                ${wallClock('d.bucket', 'h.end_minute', 'l.timezone')}) AS span
+    FROM branches l
     CROSS JOIN days d
     JOIN business_hours h
       ON h.business_id = $businessId
@@ -600,11 +742,42 @@ const LOCATIONS_SQL = `
             ELSE h.location_id IS NULL
        END
      )
-    WHERE l.business_id = $businessId
-      AND l.deleted_at IS NULL
-      AND ($locationId::uuid IS NULL OR l.id = $locationId::uuid)
   ),
-  open_time AS (${MERGE_WINDOWS_SQL}
+  unavailable AS (
+    SELECT l.id AS owner_id, ${wholeDay('d.bucket', 'l.timezone')} AS span
+    FROM days d
+    CROSS JOIN branches l
+    JOIN holidays h
+      ON h.business_id = $businessId
+     AND h.is_active
+     AND h.closes_business
+     AND (h.location_id IS NULL OR h.location_id = l.id)
+     AND CASE WHEN h.is_recurring_annually
+              THEN to_char(h.date, 'MM-DD') = to_char(d.bucket, 'MM-DD')
+              ELSE h.date = d.bucket
+         END
+    UNION ALL
+    SELECT l.id,
+           tstzrange(${wallClock('d.bucket', 'COALESCE(o.start_minute, 0)', 'l.timezone')},
+                     ${wallClock('d.bucket', 'COALESCE(o.end_minute, 1440)', 'l.timezone')})
+    FROM days d
+    CROSS JOIN branches l
+    JOIN availability_overrides o
+      ON o.business_id = $businessId
+     AND NOT o.is_available
+     AND o.date = d.bucket
+     AND (o.scope = 'BUSINESS' OR (o.scope = 'LOCATION' AND o.location_id = l.id))
+    UNION ALL
+    SELECT l.id, tstzrange(bp.starts_at, bp.ends_at)
+    FROM branches l
+    CROSS JOIN bounds b
+    JOIN blackout_periods bp
+      ON bp.business_id = $businessId
+     AND bp.starts_at < b.to_ts
+     AND bp.ends_at   > b.from_ts
+     AND (bp.scope = 'BUSINESS' OR (bp.scope = 'LOCATION' AND bp.location_id = l.id))
+  ),
+  open_time AS (${NET_WINDOW_MINUTES_SQL}
   )
   SELECT
     l.id                                     AS location_id,

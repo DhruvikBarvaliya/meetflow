@@ -6,9 +6,16 @@
  * Sequelize — which is what makes DST behaviour, buffer arithmetic and booking
  * limits exhaustively unit-testable without a database.
  *
- * Timezone work happens *before* this file (see availabilityService.ts, which
+ * Timezone work happens *before* this file (see availability.service.ts, which
  * uses utils/time.ts to turn wall-clock rules into instants). By the time
  * anything gets here, every boundary is an absolute UTC instant.
+ *
+ * The engine exists to serve one invariant, which availability.service.ts
+ * states in full: **a slot the search offers must never be refused at commit,
+ * and a slot the search hides must never be bookable.** Every constraint that
+ * can refuse a booking therefore has to be expressible here — which is why
+ * resource contention and daily booking caps are inputs rather than something
+ * only the confirmation path knows about.
  */
 import { addMinutes, intervalsOverlap, mergeIntervals } from '../utils/time';
 
@@ -57,6 +64,18 @@ export interface SlotEngineInput {
   slotIntervalMinutes: number;
   /** Earliest a booking may be made, relative to `now`. */
   minNoticeMinutes: number;
+
+  /**
+   * Spans in which a daily booking cap has already been reached.
+   *
+   * Caps ("two appointments per customer per day", "eight per provider per
+   * day") are counted per calendar day in a named zone, which is a wall-clock
+   * notion this file must not know about; the caller resolves each full day to
+   * an instant span and passes it in. Candidates *starting* inside one are
+   * refused — the cap counts an appointment on the day it starts, exactly as
+   * `assertBookingLimits` does when the booking is committed.
+   */
+  limitReached?: Array<{ start: Date; end: Date }>;
 
   /** Injected rather than read from the system clock, so tests are deterministic. */
   now: Date;
@@ -178,6 +197,9 @@ export function generateSlots(input: SlotEngineInput): SlotEngineResult {
 
   const earliestStart = addMinutes(now, minNoticeMinutes);
   const busy = mergeBusy(input.busy);
+  // Day-length spans, a handful at most: merged so an overlapping customer cap
+  // and provider cap on the same day are tested once.
+  const capped = mergeIntervals(input.limitReached ?? []);
 
   // Joinable group appointments are keyed by start instant so a candidate slot
   // landing on one can be turned into a "join this class" offer.
@@ -216,6 +238,19 @@ export function generateSlots(input: SlotEngineInput): SlotEngineResult {
       if (startsAt < earliestStart) {
         if (explain) rejected.push({ startsAt, reason: 'TOO_SOON' });
         candidate = addMinutes(candidate, slotIntervalMinutes);
+        continue;
+      }
+
+      // Checked before the joinable branch: taking a place in an existing group
+      // session still counts towards the day's cap, so a customer at their
+      // limit must not be offered a class to join either.
+      const cap = capped.find((span) => startsAt >= span.start && startsAt < span.end);
+      if (cap) {
+        if (explain) rejected.push({ startsAt, reason: 'LIMIT_REACHED' });
+        // Skip to the end of the capped day rather than walking a whole day of
+        // grid positions that are all refused for the same reason.
+        const skipTo = alignForward(cap.end, window.start, slotIntervalMinutes);
+        candidate = skipTo > candidate ? skipTo : addMinutes(candidate, slotIntervalMinutes);
         continue;
       }
 
@@ -289,6 +324,11 @@ export function generateSlots(input: SlotEngineInput): SlotEngineResult {
  * is right for *offering* times must not be able to reject a time the engine
  * itself offered a moment earlier, and confirmation cares only about "is this
  * exact window free and in policy".
+ *
+ * Daily booking caps are deliberately absent: they are counted, and refused,
+ * inside the booking transaction where the count cannot go stale between the
+ * check and the INSERT. `generateSlots` takes them as an input only so the
+ * search stops offering times that commit is certain to refuse.
  */
 export function isSlotBookable(input: {
   startsAt: Date;

@@ -160,6 +160,74 @@ export const requireTenant: RequestHandler = async (
   }
 };
 
+/**
+ * Resolves tenant context when the caller has one, and continues without when
+ * they do not. The optional counterpart to `requireTenant`, in the same way
+ * `optionalAuthenticate` is the optional counterpart to `authenticate`.
+ *
+ * It exists for endpoints that must answer *both* kinds of caller. `/auth/me`
+ * is the case that motivated it: a member needs their effective permissions
+ * back, and a user with no membership at all — a customer, an invitee who has
+ * not accepted yet — still needs a valid answer rather than the 404
+ * `requireTenant` gives them.
+ *
+ * Every way of not resolving a workspace is silent here, and each is a case
+ * `requireTenant` deliberately treats as an error:
+ *
+ *  - a malformed `X-Business-Id`, which over there must not become an oracle
+ *    for which workspace ids exist and so answers 404;
+ *  - a workspace the caller does not belong to, for the same reason;
+ *  - no header from someone who belongs to several, which over there is a
+ *    request to choose. This endpoint is precisely where they *discover* the
+ *    list to choose from, so demanding the choice first would be circular.
+ *
+ * What is not swallowed is a database failure: `loadTenantContext` raising is
+ * passed to `next` like anywhere else, because "the query broke" and "you have
+ * no membership" must never look the same.
+ */
+export const optionalTenant: RequestHandler = async (
+  req: Request,
+  _res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  try {
+    if (!req.auth) {
+      next();
+      return;
+    }
+
+    const header = req.header(BUSINESS_HEADER)?.trim();
+    if (header && !UUID_PATTERN.test(header)) {
+      next();
+      return;
+    }
+
+    const tenant = await loadTenantContext(req.auth.userId, header ?? null);
+    if (!tenant) {
+      next();
+      return;
+    }
+
+    // Same auto-selection rule as `requireTenant`, and the same query behind
+    // it: one membership and no header means that workspace, several means the
+    // caller has not chosen and nothing is assumed on their behalf.
+    if (!header) {
+      const count = await Membership.count({
+        where: { userId: req.auth.userId, status: 'ACTIVE' },
+      });
+      if (count > 1) {
+        next();
+        return;
+      }
+    }
+
+    req.tenant = tenant;
+    next();
+  } catch (error) {
+    next(error);
+  }
+};
+
 /** Requires every listed permission. */
 export function requirePermission(...required: PermissionKey[]): RequestHandler {
   return (req: Request, _res: Response, next: NextFunction): void => {

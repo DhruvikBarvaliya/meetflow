@@ -44,6 +44,7 @@ import {
   Service,
   ServiceResourceRequirement,
   StaffProfile,
+  User,
 } from '../../database/models';
 import { ACTIVE_APPOINTMENT_STATUSES } from '../../database/models/Appointment';
 import {
@@ -508,6 +509,19 @@ export async function createBooking(input: CreateBookingInput): Promise<BookingR
   });
   if (!service) throw new NotFoundError('Service');
 
+  // The link's own approval flag, loaded here because `EffectivePolicy` is
+  // resolved from the service and the workspace settings and knows nothing
+  // about which link a booking arrived through. Scoped to the workspace for the
+  // same reason the booking counter below is: an id from elsewhere must not
+  // reach in and change this booking's outcome. Absent link, absent flag — the
+  // only callers that pass an id resolved it first.
+  const bookingLink = input.bookingLinkId
+    ? await BookingLink.findOne({
+        where: { id: input.bookingLinkId, businessId: input.businessId },
+        attributes: ['id', 'requiresApproval'],
+      })
+    : null;
+
   // --- Idempotency claim -------------------------------------------------
   const requestHash = canonicalHash({
     businessId: input.businessId,
@@ -621,7 +635,18 @@ export async function createBooking(input: CreateBookingInput): Promise<BookingR
           transaction,
         );
 
-        const requiresApproval = policy.requiresApproval;
+        // Booking link OR service OR workspace setting. `policy.requiresApproval`
+        // is already the second and third of those ORed together; the link is
+        // the layer it cannot see, and this is where the three meet.
+        //
+        // OR rather than an override chain, which is how every *other* field on
+        // the policy resolves. Approval is a safety valve, not a preference:
+        // each layer is a different person saying "let me look at this before it
+        // is promised", and the nearest one winning would let a campaign link
+        // switch off review that the workspace turned on. So any layer asking
+        // for it wins, and no layer can turn another's off.
+        const requiresApproval =
+          policy.requiresApproval || (bookingLink?.requiresApproval ?? false);
         const initialStatus = requiresApproval ? 'PENDING' : 'CONFIRMED';
 
         // --- Group services: join an existing class if one has room --------
@@ -897,6 +922,28 @@ export async function createBooking(input: CreateBookingInput): Promise<BookingR
         customerName: `${result.customer.firstName} ${result.customer.lastName ?? ''}`.trim(),
       },
     );
+    // A booking is where a provider acquires an appointment, so it is where
+    // `staff.assigned` belongs. Only when this request created the appointment:
+    // the second person joining a yoga class is an attendee arriving, not a
+    // provider being assigned, and the ORGANIZER role is what distinguishes the
+    // booking that created the session from the ones that joined it.
+    if (result.appointment.staffProfileId && result.participant.role === 'ORGANIZER') {
+      emitAppointmentEvent(
+        SocketEvents.staffAssigned,
+        {
+          businessId: result.appointment.businessId,
+          staffProfileId: result.appointment.staffProfileId,
+          appointmentId: result.appointment.id,
+        },
+        {
+          appointmentId: result.appointment.id,
+          publicId: result.appointment.publicId,
+          staffProfileId: result.appointment.staffProfileId,
+          startsAt: result.appointment.startsAt,
+          endsAt: result.appointment.endsAt,
+        },
+      );
+    }
     emitToWorkspace(result.appointment.businessId, SocketEvents.dashboardMetricsUpdated, {
       reason: 'appointment.created',
     });
@@ -922,10 +969,28 @@ export async function createBooking(input: CreateBookingInput): Promise<BookingR
 }
 
 /**
- * Writes the confirmation and reminder rows into the notification outbox.
+ * How long after an appointment ends its follow-up goes out.
+ *
+ * A day: long enough not to land while the customer is still in the car park,
+ * short enough that "ready to book again?" refers to something they remember.
+ * Exported because a reschedule has to re-queue the follow-up it withdrew, and
+ * the two must agree — a follow-up that moves to a different offset every time
+ * an appointment is moved is not a policy, it is a bug with a delay on it.
+ *
+ * Deliberately not configurable yet: `business_settings` carries reminder
+ * offsets and nothing for this, and inventing a column here would put a
+ * migration in the booking path.
+ */
+export const FOLLOW_UP_DELAY_MINUTES = 24 * 60;
+
+/**
+ * Writes the confirmation, reminder, welcome, follow-up and operational rows
+ * into the notification outbox.
  *
  * Inside the booking transaction on purpose: a rolled-back booking must not
  * leave a confirmation behind, and a committed one must not lose its reminders.
+ * Everything queued here obeys that rule, including the messages addressed to
+ * the business rather than to the customer.
  */
 async function enqueueBookingNotifications(
   context: {
@@ -997,6 +1062,51 @@ async function enqueueBookingNotifications(
     );
   }
 
+  // The thank-you is queued now rather than when the appointment completes,
+  // and that is what makes it withdrawable: `withdrawStaleMessages` cancels a
+  // pending follow-up when the booking is cancelled, rejected, moved or missed,
+  // and it can only cancel a row that already exists. A visit that goes ahead
+  // keeps it — including one nobody remembered to close out afterwards, which
+  // is the common case in a busy diary and not a reason to stay silent.
+  const followUpAt = addMinutes(appointment.endsAt, FOLLOW_UP_DELAY_MINUTES);
+  if (followUpAt.getTime() > Date.now()) {
+    await enqueueNotification(
+      {
+        businessId: business.id,
+        type: 'APPOINTMENT_FOLLOW_UP',
+        recipientType: 'CUSTOMER',
+        recipientCustomerId: customer.id,
+        recipientAddress: customer.email,
+        appointmentId: appointment.id,
+        payload,
+        scheduledFor: followUpAt,
+        dedupeKey: `follow-up:${appointment.id}:${customer.id}`,
+      },
+      { transaction },
+    );
+  }
+
+  // First booking this person has ever made with the workspace. The counter was
+  // incremented earlier in this transaction, so 1 means "this booking is the
+  // first". The dedupe key names the customer rather than the appointment: a
+  // welcome is a once-ever message, and someone who cancels and rebooks is not
+  // welcomed twice.
+  if (customer.totalBookings <= 1) {
+    await enqueueNotification(
+      {
+        businessId: business.id,
+        type: 'CUSTOMER_WELCOME',
+        recipientType: 'CUSTOMER',
+        recipientCustomerId: customer.id,
+        recipientAddress: customer.email,
+        appointmentId: appointment.id,
+        payload,
+        dedupeKey: `welcome:${customer.id}`,
+      },
+      { transaction },
+    );
+  }
+
   // Tell the provider, so a staff member who is not watching the dashboard
   // still learns about a new booking.
   const staffUser = await StaffProfile.findByPk(staffProfile.id, {
@@ -1015,6 +1125,36 @@ async function enqueueBookingNotifications(
         appointmentId: appointment.id,
         payload,
         dedupeKey: `staff-assigned:${appointment.id}:${user.id}`,
+      },
+      { transaction },
+    );
+  }
+
+  // And tell the owner, which the specification asks for and nothing did: the
+  // person running the business wants to know a booking landed without keeping
+  // a dashboard open for it.
+  //
+  // Skipped when the owner is the provider. In a single-practitioner workspace
+  // — the most common shape there is — they have just been told as the staff
+  // member, and two emails about one appointment is how a business learns to
+  // filter both of them into a folder.
+  const owner = await User.findByPk(business.ownerUserId, {
+    attributes: ['id', 'email'],
+    transaction,
+  });
+  if (owner?.email && owner.id !== user?.id) {
+    await enqueueNotification(
+      {
+        businessId: business.id,
+        type: 'OWNER_NEW_BOOKING',
+        recipientType: 'OWNER',
+        recipientUserId: owner.id,
+        recipientAddress: owner.email,
+        appointmentId: appointment.id,
+        payload,
+        // Keyed on the customer, not only the appointment: each attendee
+        // joining a group session is a booking the owner has not heard about.
+        dedupeKey: `owner-new-booking:${appointment.id}:${customer.id}`,
       },
       { transaction },
     );

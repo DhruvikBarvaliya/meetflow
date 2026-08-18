@@ -32,6 +32,7 @@ export const JOB_NAMES = {
   purgeExpiredTokens: 'maintenance.purge_expired_tokens',
   purgeIdempotencyKeys: 'maintenance.purge_idempotency_keys',
   advanceInProgress: 'maintenance.advance_in_progress',
+  sendOwnerDailyDigests: 'maintenance.owner_daily_digest',
 } as const;
 
 /**
@@ -108,6 +109,11 @@ export async function registerRepeatableJobs(): Promise<void> {
     [JOB_NAMES.advanceInProgress, 60_000],
     [JOB_NAMES.purgeExpiredTokens, 3_600_000],
     [JOB_NAMES.purgeIdempotencyKeys, 3_600_000],
+    // Hourly, not daily: "morning" is a local hour and every workspace keeps
+    // its own, so the job wakes up each hour and asks which of them are in it.
+    // BullMQ aligns an `every` repeat to the epoch, so this lands once per hour
+    // and each workspace's digest hour is entered exactly once a day.
+    [JOB_NAMES.sendOwnerDailyDigests, 3_600_000],
   ];
 
   for (const [jobName, interval] of maintenanceSchedules) {

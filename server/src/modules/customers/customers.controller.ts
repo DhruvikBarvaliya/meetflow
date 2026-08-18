@@ -4,6 +4,16 @@
  * Controllers stay thin: read validated input, take the tenant from the proven
  * membership, call the service, shape the response. All business rules live in
  * customers.service.ts.
+ *
+ * Two things are settled at this boundary and only here, because neither can be
+ * declared on a route:
+ *
+ *  - **Which customers the caller may see.** The read routes admit
+ *    `customers:read` or `customers:read:assigned`, so the width is resolved
+ *    here from the effective permission set and handed to the service as a
+ *    scope — the same shape appointments.controller.ts passes down.
+ *  - **Whether they may write a note**, which depends on the body the request
+ *    carries rather than on the path it took.
  */
 import type { Request, Response } from 'express';
 import { requestIdOf } from '../../middleware/requestContext';
@@ -45,9 +55,11 @@ function metadataOf(req: Request): RequestMetadata {
 }
 
 export const list = asyncHandler(async (req: Request, res: Response) => {
+  const tenant = tenantOf(req);
   const filters = query(req, listCustomersQuerySchema);
   const { rows, totalItems } = await customerService.listCustomers(
-    tenantOf(req).businessId,
+    tenant.businessId,
+    customerService.scopeOf(tenant),
     filters,
   );
   sendPage(res, rows, { page: filters.page, pageSize: filters.pageSize, totalItems });
@@ -64,16 +76,23 @@ export const create = asyncHandler(async (req: Request, res: Response) => {
 });
 
 export const get = asyncHandler(async (req: Request, res: Response) => {
+  const tenant = tenantOf(req);
   const { id } = params(req, customerIdParamSchema);
-  const detail = await customerService.getCustomer(tenantOf(req).businessId, id);
+  const detail = await customerService.getCustomer(
+    tenant.businessId,
+    customerService.scopeOf(tenant),
+    id,
+  );
   sendSuccess(res, detail);
 });
 
 export const listAppointments = asyncHandler(async (req: Request, res: Response) => {
+  const tenant = tenantOf(req);
   const { id } = params(req, customerIdParamSchema);
   const filters = query(req, listCustomerAppointmentsQuerySchema);
   const { rows, totalItems } = await customerService.listCustomerAppointments(
-    tenantOf(req).businessId,
+    tenant.businessId,
+    customerService.scopeOf(tenant),
     id,
     filters,
   );

@@ -42,24 +42,43 @@ sees their diary change.
 All server → client. Payloads carry ids and the fields a dashboard needs to
 update in place; they are never a substitute for fetching the full record.
 
-| Event                       | Emitted when                                   | Payload                                                                                          |
-| --------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `connection.ready`          | immediately after a successful handshake       | `{ userId, workspaces[], staffProfiles[] }`                                                      |
-| `appointment.created`       | a booking commits                              | `{ appointmentId, publicId, status, startsAt, endsAt, serviceId, staffProfileId, customerName }` |
-| `appointment.updated`       | notes, check-in, approval, reassignment        | `{ appointmentId, publicId, status, ... }`                                                       |
-| `appointment.rescheduled`   | a move commits                                 | `{ appointmentId, publicId, previousStartsAt, startsAt, endsAt, staffProfileId }`                |
-| `appointment.cancelled`     | a cancellation commits                         | `{ appointmentId, publicId, startsAt, fullyCancelled }`                                          |
-| `appointment.completed`     | marked completed                               | `{ appointmentId, publicId, status }`                                                            |
-| `appointment.no_show`       | marked no-show                                 | `{ appointmentId, publicId, status }`                                                            |
-| `availability.updated`      | hours, overrides, holidays or blackouts change | `{ scope, staffProfileId?, date? }`                                                              |
-| `staff.assigned`            | a provider is assigned                         | `{ appointmentId, staffProfileId }`                                                              |
-| `waitlist.slot_available`   | a waitlist entry is offered a slot             | `{ waitlistEntryId, serviceId, startsAt, holdExpiresAt }`                                        |
-| `dashboard.metrics_updated` | any change that invalidates dashboard figures  | `{ reason }`                                                                                     |
-| `notification.created`      | an in-app notification is written              | `{ notificationId, type }`                                                                       |
+| Event                       | Emitted when                                          | Payload                                                                                          |
+| --------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| `connection.ready`          | immediately after a successful handshake              | `{ userId, workspaces[], staffProfiles[] }`                                                      |
+| `appointment.created`       | a booking commits                                     | `{ appointmentId, publicId, status, startsAt, endsAt, serviceId, staffProfileId, customerName }` |
+| `appointment.updated`       | notes, check-in, approval, reassignment               | `{ appointmentId, publicId, status, ... }`                                                       |
+| `appointment.rescheduled`   | a move commits                                        | `{ appointmentId, publicId, previousStartsAt, startsAt, endsAt, staffProfileId }`                |
+| `appointment.cancelled`     | a cancellation commits                                | `{ appointmentId, publicId, startsAt, fullyCancelled }`                                          |
+| `appointment.completed`     | marked completed                                      | `{ appointmentId, publicId, status }`                                                            |
+| `appointment.no_show`       | marked no-show                                        | `{ appointmentId, publicId, status }`                                                            |
+| `availability.updated`      | hours, overrides, holidays or blackouts change        | `{ scope, staffProfileId?, date? }`                                                              |
+| `staff.assigned`            | a booking assigns a provider, or a move reassigns one | `{ appointmentId, publicId, staffProfileId, previousStaffProfileId?, startsAt, endsAt }`         |
+| `waitlist.slot_available`   | a waitlist entry is offered a slot                    | `{ waitlistEntryId, serviceId, startsAt, holdExpiresAt }`                                        |
+| `dashboard.metrics_updated` | any change that invalidates dashboard figures         | `{ reason }`                                                                                     |
+| `notification.created`      | an outbox row addressed to a member commits           | `{ notificationId, type }`                                                                       |
 
 `dashboard.metrics_updated` deliberately carries only a reason. Recomputing
 analytics server-side for every connected socket would be wasteful; the client
 refetches the figures it is actually displaying.
+
+`staff.assigned` fires alongside `appointment.created` on a booking and
+alongside `appointment.rescheduled` on a reassignment, because both are ways a
+provider acquires an appointment. It does **not** fire when someone joins an
+existing group session: an attendee arriving does not reassign the class.
+`previousStaffProfileId` is present only on a reassignment, and the provider who
+lost the appointment is told separately, by `appointment.updated` carrying
+`reassignedTo`.
+
+`notification.created` follows the recipient, not the workspace. It is emitted
+only for rows addressed to a **user** — never for a customer's confirmation,
+which goes to an inbox and to no socket, and never for account email such as a
+password reset, which belongs to no workspace. The room is the recipient's own
+`staff:{staffProfileId}` when they have a staff profile; a member without one (a
+receptionist, an owner who takes no appointments) is only ever in
+`workspace:{businessId}`, so that is where theirs is announced. The payload is
+an id and a type — never the subject, the body or the address — so the second
+case tells a colleague that a message exists without telling them whose it is or
+what it says.
 
 ## Ordering guarantee
 

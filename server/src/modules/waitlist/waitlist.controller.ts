@@ -38,7 +38,7 @@ function metadataOf(req: Request): RequestMetadata {
   };
 }
 
-function actorOf(req: Request): waitlistService.WaitlistActor {
+function actorOf(req: Request): waitlistService.WaitlistStaffActor {
   if (!req.auth) throw new UnauthenticatedError();
   return {
     userId: req.auth.userId,

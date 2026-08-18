@@ -16,6 +16,7 @@
 import { Router } from 'express';
 import { authenticate } from '../../middleware/authenticate';
 import { authIpRateLimit, credentialRateLimit } from '../../middleware/rateLimit';
+import { optionalTenant } from '../../middleware/tenant';
 import { validate } from '../../middleware/validate';
 import * as controller from './auth.controller';
 import {
@@ -57,7 +58,22 @@ authRouter.post('/logout', authIpRateLimit, validate({ body: refreshSchema }), c
 
 authRouter.post('/logout-all', authenticate, controller.logoutAll);
 
-authRouter.get('/me', authenticate, controller.me);
+/**
+ * `optionalTenant`, never `requireTenant`.
+ *
+ * This router is mounted straight onto `apiRouter`, above the management chain,
+ * so nothing here passes through tenant resolution on its own. Without this
+ * line `req.tenant` is unset on every single request and `activeWorkspace` is
+ * unconditionally null — which is what made the field's documented condition
+ * unsatisfiable and left the client mirroring the role catalogue itself.
+ *
+ * `requireTenant` is the wrong tool: it answers 404 to anyone without an ACTIVE
+ * membership, and this endpoint must keep answering for exactly those callers —
+ * a customer, or an invitee who has not accepted yet. The optional variant
+ * resolves a workspace when the caller has one and says nothing when they do
+ * not.
+ */
+authRouter.get('/me', authenticate, optionalTenant, controller.me);
 
 authRouter.post(
   '/verify-email',

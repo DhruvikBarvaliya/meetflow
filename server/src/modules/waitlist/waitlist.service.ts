@@ -4,17 +4,22 @@
  *
  * Four rules shape every function here:
  *
- *  1. `businessId` is always the first parameter and always comes from the
- *     caller's proven membership. Another workspace's entry, and one that was
- *     never created, produce the same 404 — a 403 would confirm the id is real
- *     and turn these endpoints into an existence oracle.
+ *  1. `businessId` is always the first parameter and never comes from a request
+ *     body. On the management surface it comes from the caller's proven
+ *     membership; on the public one (publicWaitlist.service.ts) it is read off
+ *     the booking link or the offer handle the caller holds, which is the only
+ *     thing they have proven. Another workspace's entry, and one that was never
+ *     created, produce the same 404 — a 403 would confirm the id is real and
+ *     turn these endpoints into an existence oracle.
  *  2. Every referenced row (customer, service, provider, location) is resolved
  *     under the same tenant filter, so a body cannot reach across tenants by
  *     naming a foreign id.
  *  3. The matcher owns `status`, `notifiedAt`, `notificationCount`,
  *     `heldSlotStartsAt`, `holdExpiresAt` and `convertedAppointmentId`. Nothing
  *     a client sends can write them; the only transitions this file performs
- *     are the deliberate ones behind `DELETE`, `/notify` and `/convert`.
+ *     are the deliberate ones behind `DELETE`, `/notify`, `/convert` and the
+ *     public claim, plus `releaseLapsedHold` for a hold that has already run
+ *     out of time.
  *  4. An entry is never hard-deleted. CANCELLED and EXPIRED are terminal states
  *     that stay visible, so a customer can always be told why they were never
  *     called.
@@ -43,8 +48,8 @@ import {
 } from '../../utils/errors';
 import { newWaitlistPublicId } from '../../utils/ids';
 import { isValidTimezone, toIsoDateInZone } from '../../utils/time';
-import { createBooking } from '../appointments/booking.service';
-import { AuditActions, recordAudit } from '../audit/audit.service';
+import { createBooking, type BookingActor } from '../appointments/booking.service';
+import { AuditActions, recordAudit, type AuditInput } from '../audit/audit.service';
 import type { RequestMetadata } from '../auth/auth.service';
 import { enqueueNotification } from '../notifications/notification.service';
 import { offerSlotToEntry } from './waitlist.matcher';
@@ -82,7 +87,7 @@ const ENTRY_INCLUDES = [
   { model: Appointment, as: 'convertedAppointment', attributes: [...APPOINTMENT_ATTRIBUTES] },
 ];
 
-export interface WaitlistActor {
+export interface WaitlistStaffActor {
   userId: string;
   email: string;
   /**
@@ -93,6 +98,28 @@ export interface WaitlistActor {
   type: 'OWNER' | 'STAFF';
 }
 
+/**
+ * The customer themself, arriving through the public surface with no login at
+ * all — their authorisation is the opaque handle in the URL they were emailed.
+ * `customerId` is read off the entry rather than sent by the caller, so this
+ * cannot name anybody else.
+ */
+export interface WaitlistCustomerActor {
+  customerId: string;
+  email: string;
+  type: 'CUSTOMER';
+}
+
+/**
+ * Who is acting on an entry.
+ *
+ * The two arrive through different doors and the audit trail has to keep them
+ * apart afterwards: "the customer claimed the offer we sent them" and "the
+ * front desk booked them in" are materially different answers to the question
+ * of why an appointment exists.
+ */
+export type WaitlistActor = WaitlistStaffActor | WaitlistCustomerActor;
+
 export interface WaitlistPage {
   rows: WaitlistEntry[];
   totalItems: number;
@@ -101,6 +128,45 @@ export interface WaitlistPage {
 export interface WaitlistConversion {
   entry: WaitlistEntry;
   appointment: Appointment;
+}
+
+/** The audit columns that describe an actor, filled in from one union member. */
+type AuditActorFields = Pick<
+  AuditInput,
+  'actorType' | 'actorUserId' | 'actorCustomerId' | 'actorLabel'
+>;
+
+function auditActorOf(actor: WaitlistActor): AuditActorFields {
+  if (actor.type === 'CUSTOMER') {
+    return {
+      actorType: 'CUSTOMER',
+      actorUserId: null,
+      actorCustomerId: actor.customerId,
+      actorLabel: actor.email,
+    };
+  }
+  return {
+    actorType: 'USER',
+    actorUserId: actor.userId,
+    actorCustomerId: null,
+    actorLabel: actor.email,
+  };
+}
+
+/**
+ * The same actor, as `createBooking` records it.
+ *
+ * A claimed offer is a customer's own booking and is attributed exactly like
+ * one made through a booking link, so nothing downstream — reporting, the
+ * appointment's history, the audit row `createBooking` writes itself — has to
+ * treat the waitlist as a special case.
+ */
+function bookingActorOf(actor: WaitlistActor): BookingActor {
+  return {
+    type: actor.type,
+    userId: actor.type === 'CUSTOMER' ? null : actor.userId,
+    label: actor.email,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +186,22 @@ async function findEntryOrThrow(
     where: { id: entryId, businessId },
     transaction,
   });
+  if (!entry) throw new NotFoundError('Waitlist entry');
+  return entry;
+}
+
+/**
+ * The one place an entry is loaded by its public handle, for the surface where
+ * that handle is the whole of the caller's authorisation.
+ *
+ * Deliberately not scoped by tenant, exactly like `loadAppointmentByPublicId`:
+ * there is no proven membership on the public surface, so the workspace is read
+ * off the row the handle names. That is safe only because a `wlt_…` handle is
+ * 26 random characters — it behaves as a bearer token, which is also why the
+ * public views built from it publish opaque identifiers and nothing else.
+ */
+export async function loadWaitlistEntryByPublicId(publicId: string): Promise<WaitlistEntry> {
+  const entry = await WaitlistEntry.findOne({ where: { publicId } });
   if (!entry) throw new NotFoundError('Waitlist entry');
   return entry;
 }
@@ -322,9 +404,7 @@ export async function createWaitlistEntry(
     await recordAudit(
       {
         businessId,
-        actorType: 'USER',
-        actorUserId: actor.userId,
-        actorLabel: actor.email,
+        ...auditActorOf(actor),
         action: AuditActions.WAITLIST_CREATED,
         entityType: 'waitlist_entry',
         entityId: created.id,
@@ -515,9 +595,7 @@ export async function updateWaitlistEntry(
     await recordAudit(
       {
         businessId,
-        actorType: 'USER',
-        actorUserId: actor.userId,
-        actorLabel: actor.email,
+        ...auditActorOf(actor),
         // The catalogue has no `waitlist.updated` action and this module may not
         // add one. An edit is a restatement of the same standing request — which
         // is exactly what the partial unique index enforces — so it is recorded
@@ -616,9 +694,7 @@ export async function cancelWaitlistEntry(
     await recordAudit(
       {
         businessId,
-        actorType: 'USER',
-        actorUserId: actor.userId,
-        actorLabel: actor.email,
+        ...auditActorOf(actor),
         action: AuditActions.WAITLIST_CANCELLED,
         entityType: 'waitlist_entry',
         entityId: entry.id,
@@ -654,7 +730,10 @@ export async function cancelWaitlistEntry(
 export async function notifyWaitlistEntry(
   businessId: string,
   entryId: string,
-  actor: WaitlistActor,
+  // Staff only, and narrower than every other function here on purpose: a
+  // re-offer is a front-desk action. The public surface has no way to ask for
+  // one, and an offer nobody with a login stands behind is not an offer.
+  actor: WaitlistStaffActor,
   metadata: RequestMetadata,
 ): Promise<WaitlistEntry> {
   const entry = await findEntryOrThrow(businessId, entryId);
@@ -683,6 +762,28 @@ export async function notifyWaitlistEntry(
   return loadEntryDetail(businessId, entryId);
 }
 
+/**
+ * Puts an entry whose hold has run out back into the queue.
+ *
+ * The maintenance sweep does this workspace-wide on a schedule, but a customer
+ * who opens their offer link one minute late must not be told to wait for a
+ * background job before either they or anybody else can have the slot. No audit
+ * row, for the same reason the sweep writes none: a hold lapsing is the passage
+ * of time, not an act by anyone.
+ *
+ * A no-op unless the hold really has expired — a live hold released by mistake
+ * would hand somebody else's opening away.
+ */
+export async function releaseLapsedHold(entry: WaitlistEntry): Promise<void> {
+  if (entry.status !== 'NOTIFIED' || entry.hasActiveHold) return;
+
+  await entry.update({ status: 'ACTIVE', holdExpiresAt: null, heldSlotStartsAt: null });
+  log.info(
+    { businessId: entry.businessId, waitlistEntryId: entry.id },
+    'released a lapsed waitlist hold',
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Conversion
 // ---------------------------------------------------------------------------
@@ -695,6 +796,11 @@ export async function notifyWaitlistEntry(
  * word, and the customer gets the same confirmation as any other booking. This
  * function's own job is only to mark the request satisfied and point it at the
  * appointment that satisfied it.
+ *
+ * Shared with the public claim, and that is what keeps the two honest: a slot a
+ * customer accepts for themselves and one the front desk accepts for them are
+ * the same booking, with the same idempotency key, the same audit action and
+ * the same state left behind. Only the actor differs.
  */
 export async function convertWaitlistEntry(
   businessId: string,
@@ -730,7 +836,7 @@ export async function convertWaitlistEntry(
       phone: customer.phone,
     },
     source: 'WAITLIST',
-    actor: { type: actor.type, userId: actor.userId, label: actor.email },
+    actor: bookingActorOf(actor),
     requestMetadata: metadata,
     // Keyed on the entry and the time, so a double-submitted conversion returns
     // the appointment it already made instead of booking the customer twice.
@@ -751,9 +857,7 @@ export async function convertWaitlistEntry(
     await recordAudit(
       {
         businessId,
-        actorType: 'USER',
-        actorUserId: actor.userId,
-        actorLabel: actor.email,
+        ...auditActorOf(actor),
         action: AuditActions.WAITLIST_CONVERTED,
         entityType: 'waitlist_entry',
         entityId: entry.id,

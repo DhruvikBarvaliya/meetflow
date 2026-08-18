@@ -12,6 +12,34 @@
  *   - the two are intersected as *instants*, never as clock readings.
  * A clinic open 09:00–17:00 in London staffed by someone working 09:00–17:00 in
  * Mumbai therefore correctly yields only the hours that genuinely overlap.
+ *
+ * ---------------------------------------------------------------------------
+ * THE INVARIANT
+ *
+ *   A slot the search offers must never be refused at commit, and a slot the
+ *   search hides must never be bookable.
+ *
+ * Both halves matter and they fail differently. Offering something that commit
+ * refuses wastes the customer's time and reads as a broken product; hiding
+ * something that is bookable quietly loses the business revenue it never learns
+ * about. Every rule that can refuse a booking therefore has to be applied on
+ * *both* paths, from the same source of truth:
+ *
+ *   - working hours, holidays, overrides and blackouts — resolved by
+ *     `computeWorkingWindows`, which `searchAvailability` and `verifySlot` both
+ *     call with the same inputs;
+ *   - the booking horizon — `horizonDateInZone`, read in the same zone on both
+ *     sides;
+ *   - resource contention — the same arithmetic as `reserveResources` (see
+ *     resourceEngine.ts), applied by the search so the room clash is not
+ *     discovered as a 409 after the form is filled in;
+ *   - daily booking caps — resolved into `EffectivePolicy` here, so the search
+ *     hides capped days and `assertBookingLimits` refuses them at commit off
+ *     the very same numbers.
+ *
+ * When a rule genuinely cannot live on both paths, the asymmetry is spelled out
+ * where it is introduced, along with why it is safe.
+ * ---------------------------------------------------------------------------
  */
 import { Op } from 'sequelize';
 import { env } from '../config/env';
@@ -19,6 +47,7 @@ import { createLogger } from '../config/logger';
 import { ACTIVE_APPOINTMENT_STATUSES } from '../database/models/Appointment';
 import {
   Appointment,
+  AppointmentResource,
   AppointmentStaff,
   AvailabilityOverride,
   BlackoutPeriod,
@@ -26,23 +55,30 @@ import {
   BusinessSettings,
   Holiday,
   Location,
+  Resource,
   Service,
+  ServiceResourceRequirement,
   ServiceStaff,
   StaffAvailabilityRule,
   StaffProfile,
 } from '../database/models';
 import { NotFoundError, ValidationError } from '../utils/errors';
 import {
+  addDaysToDate,
   addMinutes,
   assertIsoDate,
   dayOfWeekForDate,
   eachDateInRange,
   daysBetween,
+  endOfDayInZone,
   isValidTimezone,
   resolveWallClock,
+  startOfDayInZone,
+  subtractIntervals,
   toIsoDateInZone,
   type IsoDate,
 } from '../utils/time';
+import { computeResourceBusy, type ResourceDemand, type TimeSpan } from './resourceEngine';
 import {
   generateSlots,
   isSlotBookable,
@@ -92,6 +128,20 @@ function firstDefined<T>(...values: Array<T | null | undefined>): T | undefined 
   return undefined;
 }
 
+/**
+ * The tighter of two ceilings, treating NULL as "no ceiling from this source".
+ *
+ * Unlike buffers or notice, where a staff value *replaces* the business value,
+ * two daily caps are both limits on the same count: a workspace that allows
+ * eight a day and a member who accepts four means four. Taking the first
+ * non-null would let a generous workspace default silently raise a personal
+ * cap.
+ */
+function tighterCap(...values: Array<number | null | undefined>): number | null {
+  const caps = values.filter((value): value is number => value !== null && value !== undefined);
+  return caps.length === 0 ? null : Math.min(...caps);
+}
+
 export function resolvePolicy(
   service: Service,
   settings: BusinessSettings,
@@ -122,7 +172,21 @@ export function resolvePolicy(
     noShowGraceMinutes: settings.noShowGraceMinutes,
     maxBookingsPerCustomerPerDay:
       service.maxPerCustomerPerDay ?? settings.maxBookingsPerCustomerPerDay,
-    maxBookingsPerStaffPerDay: settings.maxBookingsPerStaffPerDay,
+    // `staff_profiles.maxDailyAppointments` was, until now, only a *soft*
+    // Smart Match factor: it pushed a near-capacity member down the ranking but
+    // never stopped anyone booking them, so a member who had told the system
+    // they take four a day was given a fifth without complaint. It is resolved
+    // into the policy here rather than checked in the search, so it becomes a
+    // hard gate on both paths at once — the search hides the capped day and
+    // `assertBookingLimits` refuses it inside the booking transaction, off this
+    // same number. Enforcing it in only one of the two would have broken the
+    // invariant in one direction or the other. It stays a Smart Match factor as
+    // well: spreading work out *before* anyone reaches their cap is a different
+    // job from refusing the booking that would exceed it.
+    maxBookingsPerStaffPerDay: tighterCap(
+      staffProfile?.maxDailyAppointments,
+      settings.maxBookingsPerStaffPerDay,
+    ),
     priceAmount: serviceStaff?.priceAmountOverride ?? service.priceAmount,
     currency: service.currency,
   };
@@ -152,14 +216,17 @@ interface WindowSource {
   locationId: string | null;
 }
 
+/** A wall-clock rule resolved to instants, before any intersection. */
+interface ResolvedWindow {
+  start: Date;
+  end: Date;
+  locationId: string | null;
+}
+
 /** Resolves weekday wall-clock rules into instants for one calendar date. */
-function resolveDayWindows(
-  date: IsoDate,
-  rules: WindowSource[],
-  zone: string,
-): Array<{ start: Date; end: Date; locationId: string | null }> {
+function resolveDayWindows(date: IsoDate, rules: WindowSource[], zone: string): ResolvedWindow[] {
   const dayOfWeek = dayOfWeekForDate(date);
-  const windows: Array<{ start: Date; end: Date; locationId: string | null }> = [];
+  const windows: ResolvedWindow[] = [];
 
   for (const rule of rules) {
     if (rule.dayOfWeek !== dayOfWeek) continue;
@@ -188,16 +255,97 @@ function intersect(
   return end > start ? { start, end } : null;
 }
 
+/**
+ * Applies one date's exceptions to a set of resolved windows.
+ *
+ * `isAvailable = true` *replaces* the recurring windows for that date (working
+ * an unusual Saturday, a branch opening specially for an event);
+ * `isAvailable = false` subtracts from them, and a removal with no window at
+ * all is a whole day gone — leave, sickness, a closure.
+ *
+ * Shared by both layers rather than written twice: opening hours and staff
+ * hours obey identical exception semantics, and the only differences are which
+ * rows apply and which zone the wall-clock minutes are read in. Two copies of
+ * this is how the layers drifted apart in the first place.
+ */
+function applyOverrides(
+  date: IsoDate,
+  windows: ResolvedWindow[],
+  overrides: AvailabilityOverride[],
+  zone: string,
+): ResolvedWindow[] {
+  const forDate = overrides.filter((override) => String(override.date) === date);
+  if (forDate.length === 0) return windows;
+
+  const additions = forDate.filter((override) => override.isAvailable);
+  const removals = forDate.filter((override) => !override.isAvailable);
+
+  let result = windows;
+
+  if (additions.length > 0) {
+    result = additions
+      .map((override) => {
+        // A NULL window means the whole day; 1440 is midnight at the far end,
+        // and `end_minute` may exceed it for a window running past midnight.
+        const start = resolveWallClock(date, override.startMinute ?? 0, zone);
+        const end = resolveWallClock(date, override.endMinute ?? 1440, zone);
+        return end.instant > start.instant
+          ? { start: start.instant, end: end.instant, locationId: override.locationId }
+          : null;
+      })
+      .filter((window): window is ResolvedWindow => window !== null);
+  }
+
+  for (const removal of removals) {
+    if (removal.startMinute === null || removal.endMinute === null) {
+      result = []; // whole day off (leave, sickness, an unscheduled closure)
+      break;
+    }
+    const from = resolveWallClock(date, removal.startMinute, zone).instant;
+    const to = resolveWallClock(date, removal.endMinute, zone).instant;
+    result = result.flatMap((window) => {
+      if (to <= window.start || from >= window.end) return [window];
+      const remaining: ResolvedWindow[] = [];
+      if (from > window.start) remaining.push({ ...window, end: from });
+      if (to < window.end) remaining.push({ ...window, start: to });
+      return remaining;
+    });
+  }
+
+  return result;
+}
+
 export interface WorkingWindowContext {
   businessId: string;
   businessTimezone: string;
   staffProfile: StaffProfile;
+  /**
+   * The location this search is for, already defaulted to the provider's own
+   * (`input.locationId ?? profile.defaultLocationId`). It decides which
+   * location-scoped configuration applies, so it must be the location the
+   * appointment would actually be created at — booking resolves it the same
+   * way, and anything else scopes holidays and overrides to a branch nobody is
+   * being booked into.
+   */
   locationId: string | null;
+  /**
+   * The calendar dates whose rules are resolved. Callers pad the range they
+   * intend to *offer* by a day either side: a window belongs to the date it
+   * starts on, so an overnight rule (22:00-02:00, stored as 1320-1560) puts
+   * tomorrow's 00:30 inside today's window, and a zone difference between the
+   * business and the customer can do the same at either end.
+   */
   dates: IsoDate[];
   /** Preloaded so a multi-staff search issues one query, not one per person. */
   businessHours: BusinessHours[];
   holidays: Holiday[];
   staffRules: StaffAvailabilityRule[];
+  /**
+   * Every override for the business over `dates`, at any scope. Scoping is
+   * resolved here rather than by the caller: this is the only place that knows
+   * both the staff member and the location, and callers filtering it themselves
+   * is precisely how LOCATION-scoped rows came to be dropped on both paths.
+   */
   overrides: AvailabilityOverride[];
   locationTimezones: Map<string, string>;
 }
@@ -205,14 +353,26 @@ export interface WorkingWindowContext {
 /**
  * Computes the instants a staff member is genuinely available to be booked on
  * each requested date.
+ *
+ * Availability is an intersection, built in layers: when the business is open,
+ * narrowed to when this person works, each layer carrying its own exceptions in
+ * its own timezone.
  */
 export function computeWorkingWindows(context: WorkingWindowContext): WorkingWindow[] {
   const staffZone = context.staffProfile.timezone || context.businessTimezone;
+  const businessZone =
+    (context.locationId ? context.locationTimezones.get(context.locationId) : undefined) ??
+    context.businessTimezone;
   const result: WorkingWindow[] = [];
 
   const closedDates = new Set(
     context.holidays
       .filter((holiday) => holiday.closesBusiness && holiday.isActive)
+      // A holiday closes the branch it is observed at. `location_id IS NULL`
+      // means the whole workspace observes it; a row naming a location must not
+      // reach past that location, or a bank holiday at one branch shuts every
+      // other branch in the country along with it.
+      .filter((holiday) => holiday.locationId === null || holiday.locationId === context.locationId)
       .flatMap((holiday) => {
         const iso = String(holiday.date);
         if (!holiday.isRecurringAnnually) return [iso];
@@ -221,6 +381,25 @@ export function computeWorkingWindows(context: WorkingWindowContext): WorkingWin
         return context.dates.filter((date) => date.slice(5) === `${month}-${day}`);
       }),
   );
+
+  // Scope decides *what* an override modifies, not merely whether it applies.
+  // A staff row changes when one person works; a business or location row
+  // changes when the doors are open. Folding them all into the staff layer —
+  // which is what this did — turns "the branch opens specially on Sunday" into
+  // "everybody works Sunday", and reads business-wide rows in the staff
+  // member's timezone rather than the workspace's.
+  const openingOverrides = context.overrides.filter(
+    (override) =>
+      override.scope === 'BUSINESS' ||
+      (override.scope === 'LOCATION' && override.locationId === context.locationId),
+  );
+  const staffOverrides = context.overrides.filter(
+    (override) => override.scope === 'STAFF' && override.staffProfileId === context.staffProfile.id,
+  );
+  // RESOURCE-scoped rows are deliberately not here: they constrain rooms and
+  // equipment, not people, and are applied against the resource pool instead
+  // (see `resourceDemandsFor`). Treating them as staff leave would take a
+  // provider off the diary because a room was being serviced.
 
   for (const date of context.dates) {
     if (closedDates.has(date)) continue;
@@ -235,18 +414,19 @@ export function computeWorkingWindows(context: WorkingWindowContext): WorkingWin
     );
     const applicableHours = locationSpecific.length > 0 ? locationSpecific : businessWide;
 
-    const businessZone =
-      (context.locationId ? context.locationTimezones.get(context.locationId) : undefined) ??
-      context.businessTimezone;
-
-    const openWindows = resolveDayWindows(
+    const openWindows = applyOverrides(
       date,
-      applicableHours.map((row) => ({
-        dayOfWeek: row.dayOfWeek,
-        startMinute: row.startMinute,
-        endMinute: row.endMinute,
-        locationId: row.locationId,
-      })),
+      resolveDayWindows(
+        date,
+        applicableHours.map((row) => ({
+          dayOfWeek: row.dayOfWeek,
+          startMinute: row.startMinute,
+          endMinute: row.endMinute,
+          locationId: row.locationId,
+        })),
+        businessZone,
+      ),
+      openingOverrides,
       businessZone,
     );
     if (openWindows.length === 0) continue;
@@ -261,57 +441,23 @@ export function computeWorkingWindows(context: WorkingWindowContext): WorkingWin
       return true;
     });
 
-    let staffWindows = resolveDayWindows(
+    const staffWindows = applyOverrides(
       date,
-      activeRules.map((rule) => ({
-        dayOfWeek: rule.dayOfWeek,
-        startMinute: rule.startMinute,
-        endMinute: rule.endMinute,
-        locationId: rule.locationId,
-      })),
+      resolveDayWindows(
+        date,
+        activeRules.map((rule) => ({
+          dayOfWeek: rule.dayOfWeek,
+          startMinute: rule.startMinute,
+          endMinute: rule.endMinute,
+          locationId: rule.locationId,
+        })),
+        staffZone,
+      ),
+      staffOverrides,
       staffZone,
     );
 
-    // 3. Date-specific overrides. `is_available = true` replaces the recurring
-    //    rules for that date (working an unusual Saturday); `false` subtracts.
-    const dayOverrides = context.overrides.filter((override) => String(override.date) === date);
-    const additions = dayOverrides.filter((override) => override.isAvailable);
-    const removals = dayOverrides.filter((override) => !override.isAvailable);
-
-    if (additions.length > 0) {
-      staffWindows = additions
-        .map((override) => {
-          const startMinute = override.startMinute ?? 0;
-          const endMinute = override.endMinute ?? 1440;
-          const start = resolveWallClock(date, startMinute, staffZone);
-          const end = resolveWallClock(date, endMinute, staffZone);
-          return end.instant > start.instant
-            ? { start: start.instant, end: end.instant, locationId: override.locationId }
-            : null;
-        })
-        .filter(
-          (window): window is { start: Date; end: Date; locationId: string | null } =>
-            window !== null,
-        );
-    }
-
-    for (const removal of removals) {
-      if (removal.startMinute === null || removal.endMinute === null) {
-        staffWindows = []; // whole day off (leave, sickness)
-        break;
-      }
-      const from = resolveWallClock(date, removal.startMinute, staffZone).instant;
-      const to = resolveWallClock(date, removal.endMinute, staffZone).instant;
-      staffWindows = staffWindows.flatMap((window) => {
-        if (to <= window.start || from >= window.end) return [window];
-        const remaining: typeof staffWindows = [];
-        if (from > window.start) remaining.push({ ...window, end: from });
-        if (to < window.end) remaining.push({ ...window, start: to });
-        return remaining;
-      });
-    }
-
-    // 4. Bookable time is where the business is open AND the staff are working.
+    // 3. Bookable time is where the business is open AND the staff are working.
     for (const open of openWindows) {
       for (const working of staffWindows) {
         const overlap = intersect(open, working);
@@ -327,6 +473,170 @@ export function computeWorkingWindows(context: WorkingWindowContext): WorkingWin
   }
 
   return result;
+}
+
+// ---------------------------------------------------------------------------
+// Resources
+// ---------------------------------------------------------------------------
+
+/**
+ * Everything needed to answer "can this service's rooms be found at time T?".
+ *
+ * Loaded once per search and shared across providers, because resource
+ * contention is a property of the site and the service, not of the person.
+ */
+interface ResourceContext {
+  businessTimezone: string;
+  locationTimezones: Map<string, string>;
+  requirements: ServiceResourceRequirement[];
+  resources: Resource[];
+  /** Reservations already held, over the queried window. */
+  holds: AppointmentResource[];
+  blackouts: BlackoutPeriod[];
+  overrides: AvailabilityOverride[];
+  /** The calendar dates the overrides were loaded for. */
+  dates: IsoDate[];
+  window: TimeSpan;
+}
+
+/**
+ * When a single resource may not be used at all, ignoring what is booked in it.
+ *
+ * Blackouts and overrides are *configuration*, so they are honoured by the
+ * search and by `verifySlot` alike: a room under maintenance is refused at
+ * confirmation, not merely hidden. Reservations are the other half of the
+ * story and are handled differently — see `resourceBusyFor`.
+ */
+function resourceUnavailableSpans(resource: Resource, context: ResourceContext): TimeSpan[] {
+  // A resource's calendar day is read at the site it lives at; one that travels
+  // with the appointment (`location_id IS NULL`) falls back to the workspace.
+  const zone =
+    (resource.locationId ? context.locationTimezones.get(resource.locationId) : undefined) ??
+    context.businessTimezone;
+
+  const spans: TimeSpan[] = context.blackouts
+    .filter((blackout) => blackout.scope === 'RESOURCE' && blackout.resourceId === resource.id)
+    .map((blackout) => ({ start: blackout.startsAt, end: blackout.endsAt }));
+
+  const forResource = context.overrides.filter(
+    (override) => override.scope === 'RESOURCE' && override.resourceId === resource.id,
+  );
+
+  for (const date of context.dates) {
+    const onDate = forResource.filter((override) => String(override.date) === date);
+    if (onDate.length === 0) continue;
+
+    const dayStart = startOfDayInZone(date, zone);
+    const dayEnd = endOfDayInZone(date, zone);
+
+    const opened = onDate.filter((override) => override.isAvailable);
+    if (opened.length > 0) {
+      // An `is_available = true` row "replaces the usual rules for that day".
+      // A resource has no recurring rules — its baseline is simply "available"
+      // — so replacing that baseline with a window means the resource is
+      // available *only* then, and the rest of the day is unavailable. Reading
+      // it as a no-op would leave the row doing nothing at all, which is the
+      // state this whole scope was in.
+      spans.push(
+        ...subtractIntervals(
+          { start: dayStart, end: dayEnd },
+          opened.map((override) => ({
+            start: resolveWallClock(date, override.startMinute ?? 0, zone).instant,
+            end: resolveWallClock(date, override.endMinute ?? 1440, zone).instant,
+          })),
+        ),
+      );
+    }
+
+    for (const closed of onDate.filter((override) => !override.isAvailable)) {
+      if (closed.startMinute === null || closed.endMinute === null) {
+        spans.push({ start: dayStart, end: dayEnd });
+        continue;
+      }
+      spans.push({
+        start: resolveWallClock(date, closed.startMinute, zone).instant,
+        end: resolveWallClock(date, closed.endMinute, zone).instant,
+      });
+    }
+  }
+
+  return spans;
+}
+
+/**
+ * The candidate resources for one requirement at one location.
+ *
+ * Mirrors the `Resource.findAll` in `reserveResources` exactly, filter for
+ * filter: a requirement names either one resource or a type, and a resource
+ * pinned to a location can only serve that location while an unpinned one
+ * travels. A search that considered a different candidate set from the one
+ * booking reserves out of would hide bookable slots or offer unbookable ones.
+ */
+function candidatesFor(
+  requirement: ServiceResourceRequirement,
+  resources: Resource[],
+  locationId: string | null,
+): Resource[] {
+  return resources.filter((resource) => {
+    if (requirement.resourceId && resource.id !== requirement.resourceId) return false;
+    if (requirement.resourceType && resource.type !== requirement.resourceType) return false;
+    if (locationId && resource.locationId !== null && resource.locationId !== locationId) {
+      return false;
+    }
+    return true;
+  });
+}
+
+/**
+ * Busy intervals arising from resource contention at one location.
+ *
+ * `reservations` decides whether the reservation half of the arithmetic is
+ * applied. The search wants it; `verifySlot` deliberately does not, because it
+ * is also the reschedule path and an appointment must not be blocked by the
+ * room hold it already owns — the booking transaction re-checks that half under
+ * a lock anyway, which is the only place it can be checked without a race.
+ */
+function resourceBusyFor(
+  context: ResourceContext,
+  locationId: string | null,
+  options: { reservations: boolean } = { reservations: true },
+): BusyInterval[] {
+  if (context.requirements.length === 0) return [];
+
+  const holdsByResource = new Map<string, TimeSpan[]>();
+  if (options.reservations) {
+    for (const hold of context.holds) {
+      const list = holdsByResource.get(hold.resourceId) ?? [];
+      // One span per *row*, not per unit on the row: `reserveResources` counts
+      // rows against `capacity` and writes one row per resource it claims, so
+      // reading `quantity` here would make a resource look busier than the
+      // check that actually guards it.
+      list.push({ start: hold.startsAt, end: hold.endsAt });
+      holdsByResource.set(hold.resourceId, list);
+    }
+  }
+
+  const unavailableByResource = new Map<string, TimeSpan[]>();
+  const unavailableFor = (resource: Resource): TimeSpan[] => {
+    const cached = unavailableByResource.get(resource.id);
+    if (cached) return cached;
+    const computed = resourceUnavailableSpans(resource, context);
+    unavailableByResource.set(resource.id, computed);
+    return computed;
+  };
+
+  const demands: ResourceDemand[] = context.requirements.map((requirement) => ({
+    quantity: requirement.quantity,
+    isRequired: requirement.isRequired,
+    pool: candidatesFor(requirement, context.resources, locationId).map((resource) => ({
+      resourceId: resource.id,
+      capacity: resource.capacity,
+      unavailable: unavailableFor(resource),
+      reservations: holdsByResource.get(resource.id) ?? [],
+    })),
+  }));
+
+  return computeResourceBusy(demands, context.window);
 }
 
 // ---------------------------------------------------------------------------
@@ -453,44 +763,66 @@ export async function searchAvailability(
     return { slots: [], policy: basePolicy, timezone: input.timezone, truncated: false };
   }
 
-  const dates = eachDateInRange(effectiveFrom, effectiveTo);
-  // Pad by a day either side: a window can start on the previous local day in
-  // another zone, and overnight hours can run into the next.
+  // The dates whose *rules* are resolved, padded by a day either side of the
+  // range that will be offered. A window belongs to the date it starts on, so
+  // an overnight rule (22:00–02:00, stored as 1320–1560) puts Tuesday's 00:30
+  // inside Monday's window, and a business zone ahead of the customer's can
+  // push the first hours of a local day into the previous one. This padding was
+  // described in a comment here long before it existed: only the *database
+  // queries* were padded, while the rules themselves were resolved for the bare
+  // range, so the tail of every overnight window was silently dropped.
+  const resolutionFrom = addDaysToDate(effectiveFrom, -1);
+  const resolutionTo = addDaysToDate(effectiveTo, 1);
+  const dates = eachDateInRange(resolutionFrom, resolutionTo);
+
+  // The padded days widen the rules considered, never the answer: these two
+  // bound what may actually be offered, and the slot engine clips to them.
   const rangeStart = resolveWallClock(effectiveFrom, 0, input.timezone).instant;
   const rangeEnd = resolveWallClock(effectiveTo, 1440, input.timezone).instant;
   const queryStart = addMinutes(rangeStart, -1440);
   const queryEnd = addMinutes(rangeEnd, 1440);
 
   // One query per kind of rule, covering every candidate provider.
-  const [businessHours, holidays, staffRules, overrides, blackouts, locations] = await Promise.all([
-    BusinessHours.findAll({ where: { businessId: input.businessId, isActive: true } }),
-    Holiday.findAll({ where: { businessId: input.businessId, isActive: true } }),
-    StaffAvailabilityRule.findAll({
-      where: {
-        businessId: input.businessId,
-        staffProfileId: { [Op.in]: staffIds },
-        isActive: true,
-      },
-    }),
-    AvailabilityOverride.findAll({
-      where: {
-        businessId: input.businessId,
-        [Op.or]: [{ staffProfileId: { [Op.in]: staffIds } }, { scope: 'BUSINESS' }],
-        date: { [Op.between]: [effectiveFrom, effectiveTo] },
-      },
-    }),
-    BlackoutPeriod.findAll({
-      where: {
-        businessId: input.businessId,
-        startsAt: { [Op.lt]: queryEnd },
-        endsAt: { [Op.gt]: queryStart },
-      },
-    }),
-    Location.findAll({
-      where: { businessId: input.businessId, isActive: true },
-      attributes: ['id', 'timezone'],
-    }),
-  ]);
+  const [businessHours, holidays, staffRules, overrides, blackouts, locations, requirements] =
+    await Promise.all([
+      BusinessHours.findAll({ where: { businessId: input.businessId, isActive: true } }),
+      Holiday.findAll({ where: { businessId: input.businessId, isActive: true } }),
+      StaffAvailabilityRule.findAll({
+        where: {
+          businessId: input.businessId,
+          staffProfileId: { [Op.in]: staffIds },
+          isActive: true,
+        },
+      }),
+      // Every scope that can affect this search, over the padded dates.
+      // LOCATION rows were never loaded at all — the API accepted and stored
+      // them and nothing ever read them back — and RESOURCE rows are needed by
+      // the resource pool below. `computeWorkingWindows` decides which of them
+      // apply to which layer; filtering by scope at the call site is how the
+      // two paths drifted apart.
+      AvailabilityOverride.findAll({
+        where: {
+          businessId: input.businessId,
+          [Op.or]: [
+            { staffProfileId: { [Op.in]: staffIds } },
+            { scope: { [Op.in]: ['BUSINESS', 'LOCATION', 'RESOURCE'] } },
+          ],
+          date: { [Op.between]: [resolutionFrom, resolutionTo] },
+        },
+      }),
+      BlackoutPeriod.findAll({
+        where: {
+          businessId: input.businessId,
+          startsAt: { [Op.lt]: queryEnd },
+          endsAt: { [Op.gt]: queryStart },
+        },
+      }),
+      Location.findAll({
+        where: { businessId: input.businessId, isActive: true },
+        attributes: ['id', 'timezone'],
+      }),
+      ServiceResourceRequirement.findAll({ where: { serviceId: service.id } }),
+    ]);
 
   const locationTimezones = new Map(locations.map((location) => [location.id, location.timezone]));
 
@@ -503,6 +835,45 @@ export async function searchAvailability(
       endsAt: { [Op.gt]: queryStart },
     },
   });
+
+  // The resource pool, loaded only for services that actually need one — most
+  // do not, and this is two extra round trips on the busiest read path there is.
+  const resources = requirements.length
+    ? await Resource.findAll({ where: { businessId: input.businessId, isActive: true } })
+    : [];
+  const resourceHolds = resources.length
+    ? await AppointmentResource.findAll({
+        where: {
+          resourceId: { [Op.in]: resources.map((resource) => resource.id) },
+          isActive: true,
+          startsAt: { [Op.lt]: queryEnd },
+          endsAt: { [Op.gt]: queryStart },
+        },
+      })
+    : [];
+
+  const resourceContext: ResourceContext = {
+    businessTimezone: input.businessTimezone,
+    locationTimezones,
+    requirements,
+    resources,
+    holds: resourceHolds,
+    blackouts,
+    overrides,
+    dates,
+    window: { start: queryStart, end: queryEnd },
+  };
+  // Resource contention depends on the location, not on the provider, so
+  // several providers at the same site share one computation.
+  const resourceBusyByLocation = new Map<string, BusyInterval[]>();
+  const resourceBusyAt = (locationId: string | null): BusyInterval[] => {
+    const key = locationId ?? '';
+    const cached = resourceBusyByLocation.get(key);
+    if (cached) return cached;
+    const computed = resourceBusyFor(resourceContext, locationId);
+    resourceBusyByLocation.set(key, computed);
+    return computed;
+  };
 
   // Group services: appointments of THIS service with room left are offered as
   // joinable rather than treated as blocking.
@@ -549,6 +920,90 @@ export async function searchAvailability(
     }
   }
 
+  // ---- Daily booking caps -------------------------------------------------
+  // Both caps are counted per calendar day in the **business** zone, because
+  // that is the day `assertBookingLimits` counts when the booking is committed.
+  // Reading the day in any other zone would make the search and the commit
+  // disagree about which appointments fall on it, and the customer would be
+  // offered a time that is refused a click later.
+  // Most workspaces cap nothing, and this is the busiest read path in the
+  // product: the day counts are only worth a query when some cap could bite.
+  const capsApply =
+    (Boolean(input.customerId) && basePolicy.maxBookingsPerCustomerPerDay !== null) ||
+    settings.maxBookingsPerStaffPerDay !== null ||
+    staffProfiles.some((profile) => profile.maxDailyAppointments !== null);
+
+  const capDates = capsApply
+    ? eachDateInRange(
+        toIsoDateInZone(rangeStart, input.businessTimezone),
+        toIsoDateInZone(addMinutes(rangeEnd, -1), input.businessTimezone),
+      )
+    : [];
+
+  // Counting `Appointment` rows, not participants, and business-wide rather
+  // than per service — again because that is exactly what the commit-time check
+  // counts. A cap sourced from the service still applies across everything the
+  // customer has booked that day.
+  const cappedLoad =
+    capDates.length > 0
+      ? await Appointment.findAll({
+          where: {
+            businessId: input.businessId,
+            status: { [Op.in]: [...ACTIVE_APPOINTMENT_STATUSES] },
+            startsAt: {
+              [Op.gte]: startOfDayInZone(capDates[0]!, input.businessTimezone),
+              [Op.lt]: endOfDayInZone(capDates.at(-1)!, input.businessTimezone),
+            },
+            [Op.or]: [
+              { staffProfileId: { [Op.in]: staffIds } },
+              ...(input.customerId ? [{ customerId: input.customerId }] : []),
+            ],
+          },
+          attributes: ['staffProfileId', 'customerId', 'startsAt'],
+        })
+      : [];
+
+  const staffDayLoad = new Map<string, number>();
+  const customerDayLoad = new Map<string, number>();
+  for (const appointment of cappedLoad) {
+    const date = toIsoDateInZone(appointment.startsAt, input.businessTimezone);
+    if (appointment.staffProfileId) {
+      const key = `${appointment.staffProfileId}|${date}`;
+      staffDayLoad.set(key, (staffDayLoad.get(key) ?? 0) + 1);
+    }
+    if (input.customerId && appointment.customerId === input.customerId) {
+      customerDayLoad.set(date, (customerDayLoad.get(date) ?? 0) + 1);
+    }
+  }
+
+  /**
+   * The days already at a cap, as instant spans the slot engine can subtract.
+   *
+   * The customer cap can only be applied when the caller says who is booking.
+   * An anonymous search has no way to know, so those slots stay on offer and
+   * the commit-time check remains the authority — the one direction of the
+   * invariant that cannot be closed here.
+   */
+  const cappedDaysFor = (staffProfileId: string, policy: EffectivePolicy): TimeSpan[] => {
+    const spans: TimeSpan[] = [];
+    for (const date of capDates) {
+      const staffFull =
+        policy.maxBookingsPerStaffPerDay !== null &&
+        (staffDayLoad.get(`${staffProfileId}|${date}`) ?? 0) >= policy.maxBookingsPerStaffPerDay;
+      const customerFull =
+        Boolean(input.customerId) &&
+        policy.maxBookingsPerCustomerPerDay !== null &&
+        (customerDayLoad.get(date) ?? 0) >= policy.maxBookingsPerCustomerPerDay;
+      if (staffFull || customerFull) {
+        spans.push({
+          start: startOfDayInZone(date, input.businessTimezone),
+          end: endOfDayInZone(date, input.businessTimezone),
+        });
+      }
+    }
+    return spans;
+  };
+
   const maxSlots = Math.min(input.limit ?? env.AVAILABILITY_MAX_SLOTS, env.AVAILABILITY_MAX_SLOTS);
 
   // Generate per provider, then merge.
@@ -558,19 +1013,22 @@ export async function searchAvailability(
   for (const profile of staffProfiles) {
     const assignment = assignments.find((row) => row.staffProfileId === profile.id) ?? null;
     const policy = resolvePolicy(service, settings, profile, assignment);
+    // The branch this provider would actually be booked into. Booking resolves
+    // it identically (`input.locationId ?? staffProfile.defaultLocationId`), so
+    // every location-scoped rule below is read against the site the appointment
+    // lands at rather than only when the caller happened to name one.
+    const locationId = input.locationId ?? profile.defaultLocationId ?? null;
 
     const windows = computeWorkingWindows({
       businessId: input.businessId,
       businessTimezone: input.businessTimezone,
       staffProfile: profile,
-      locationId: input.locationId ?? profile.defaultLocationId ?? null,
+      locationId,
       dates,
       businessHours,
       holidays,
       staffRules: staffRules.filter((rule) => rule.staffProfileId === profile.id),
-      overrides: overrides.filter(
-        (override) => override.staffProfileId === profile.id || override.scope === 'BUSINESS',
-      ),
+      overrides,
       locationTimezones,
     });
 
@@ -590,13 +1048,20 @@ export async function searchAvailability(
           (blackout) =>
             blackout.scope === 'BUSINESS' ||
             (blackout.scope === 'STAFF' && blackout.staffProfileId === profile.id) ||
-            (blackout.scope === 'LOCATION' && blackout.locationId === input.locationId),
+            // Matched against the effective location, not the requested one: a
+            // maintenance closure at the branch this provider works from must
+            // block them whether or not the customer filtered by location.
+            (blackout.scope === 'LOCATION' && blackout.locationId === locationId),
         )
         .map((blackout) => ({
           start: blackout.startsAt,
           end: blackout.endsAt,
           reason: 'BLACKOUT' as const,
         })),
+      // A required room that is already taken is as blocking as a booked
+      // provider — and until now was the one constraint the search ignored and
+      // the commit enforced.
+      ...resourceBusyAt(locationId),
     ];
 
     const generated = generateSlots({
@@ -610,6 +1075,7 @@ export async function searchAvailability(
       postBufferMinutes: policy.postBufferMinutes,
       slotIntervalMinutes: policy.slotIntervalMinutes,
       minNoticeMinutes: policy.minNoticeMinutes,
+      limitReached: cappedDaysFor(profile.id, policy),
       now,
       maxSlots,
       explain: input.explain,
@@ -837,46 +1303,69 @@ export async function verifySlot(input: {
   const policy = resolvePolicy(service, settings, profile, assignment);
   const staffZone = profile.timezone || input.businessTimezone;
   const date = toIsoDateInZone(input.startsAt, staffZone);
-  const dates = [date];
+  // The neighbouring dates are resolved too, for exactly the reason the search
+  // pads its range: a window belongs to the date it *starts* on, so a 00:30
+  // start sits inside the previous day's 22:00–02:00 rule and inside no rule of
+  // its own date at all. Resolving one date only is what let the search offer
+  // overnight slots that this check then refused as OUTSIDE_WORKING_HOURS —
+  // times a customer could see, choose, and never book.
+  const dates = [addDaysToDate(date, -1), date, addDaysToDate(date, 1)];
+  // Booking creates the appointment at the caller's location or the provider's
+  // default; location-scoped rules must be read against that same site.
+  const locationId = input.locationId ?? profile.defaultLocationId ?? null;
 
-  const [businessHours, holidays, staffRules, overrides, blackouts, locations] = await Promise.all([
-    BusinessHours.findAll({ where: { businessId: input.businessId, isActive: true } }),
-    Holiday.findAll({ where: { businessId: input.businessId, isActive: true } }),
-    StaffAvailabilityRule.findAll({
-      where: { businessId: input.businessId, staffProfileId: profile.id, isActive: true },
-    }),
-    AvailabilityOverride.findAll({
-      where: {
-        businessId: input.businessId,
-        [Op.or]: [{ staffProfileId: profile.id }, { scope: 'BUSINESS' }],
-        date,
-      },
-    }),
-    BlackoutPeriod.findAll({
-      where: {
-        businessId: input.businessId,
-        startsAt: { [Op.lt]: addMinutes(input.startsAt, policy.durationMinutes + 1440) },
-        endsAt: { [Op.gt]: addMinutes(input.startsAt, -1440) },
-      },
-    }),
-    Location.findAll({
-      where: { businessId: input.businessId, isActive: true },
-      attributes: ['id', 'timezone'],
-    }),
-  ]);
+  const [businessHours, holidays, staffRules, overrides, blackouts, locations, requirements] =
+    await Promise.all([
+      BusinessHours.findAll({ where: { businessId: input.businessId, isActive: true } }),
+      Holiday.findAll({ where: { businessId: input.businessId, isActive: true } }),
+      StaffAvailabilityRule.findAll({
+        where: { businessId: input.businessId, staffProfileId: profile.id, isActive: true },
+      }),
+      // Same scopes the search loads, so the two cannot resolve a different set
+      // of rules for the same instant.
+      AvailabilityOverride.findAll({
+        where: {
+          businessId: input.businessId,
+          [Op.or]: [
+            { staffProfileId: profile.id },
+            { scope: { [Op.in]: ['BUSINESS', 'LOCATION', 'RESOURCE'] } },
+          ],
+          date: { [Op.in]: dates },
+        },
+      }),
+      BlackoutPeriod.findAll({
+        where: {
+          businessId: input.businessId,
+          startsAt: { [Op.lt]: addMinutes(input.startsAt, policy.durationMinutes + 1440) },
+          endsAt: { [Op.gt]: addMinutes(input.startsAt, -1440) },
+        },
+      }),
+      Location.findAll({
+        where: { businessId: input.businessId, isActive: true },
+        attributes: ['id', 'timezone'],
+      }),
+      ServiceResourceRequirement.findAll({ where: { serviceId: service.id } }),
+    ]);
+
+  const locationTimezones = new Map(locations.map((location) => [location.id, location.timezone]));
 
   const windows = computeWorkingWindows({
     businessId: input.businessId,
     businessTimezone: input.businessTimezone,
     staffProfile: profile,
-    locationId: input.locationId ?? profile.defaultLocationId ?? null,
+    locationId,
     dates,
     businessHours,
     holidays,
     staffRules,
     overrides,
-    locationTimezones: new Map(locations.map((location) => [location.id, location.timezone])),
+    locationTimezones,
   });
+
+  // Only services that need a room pay for this lookup.
+  const resources = requirements.length
+    ? await Resource.findAll({ where: { businessId: input.businessId, isActive: true } })
+    : [];
 
   const reservations = await AppointmentStaff.findAll({
     where: {
@@ -900,13 +1389,41 @@ export async function verifySlot(input: {
         (blackout) =>
           blackout.scope === 'BUSINESS' ||
           (blackout.scope === 'STAFF' && blackout.staffProfileId === profile.id) ||
-          (blackout.scope === 'LOCATION' && blackout.locationId === input.locationId),
+          // The effective location again: a caller who named no location is
+          // still booked into the provider's default one, and a closure there
+          // has to refuse them.
+          (blackout.scope === 'LOCATION' && blackout.locationId === locationId),
       )
       .map((blackout) => ({
         start: blackout.startsAt,
         end: blackout.endsAt,
         reason: 'BLACKOUT' as const,
       })),
+    // Resource *configuration* only — a blacked-out or closed room refuses the
+    // booking here rather than merely vanishing from the search. Existing
+    // resource holds are deliberately excluded: this function also validates
+    // reschedules, where the appointment being moved owns a hold of its own,
+    // and counting it would make an appointment conflict with itself. That half
+    // is enforced by `reserveResources` inside the booking transaction, under
+    // the row lock and exclusion constraint that make it race-free.
+    ...resourceBusyFor(
+      {
+        businessTimezone: input.businessTimezone,
+        locationTimezones,
+        requirements,
+        resources,
+        holds: [],
+        blackouts,
+        overrides,
+        dates,
+        window: {
+          start: addMinutes(input.startsAt, -policy.preBufferMinutes),
+          end: addMinutes(input.startsAt, policy.durationMinutes + policy.postBufferMinutes),
+        },
+      },
+      locationId,
+      { reservations: false },
+    ),
   ];
 
   // The booking horizon is the far edge of the window whose near edge the

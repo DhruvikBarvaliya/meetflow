@@ -3,11 +3,18 @@
  *
  * Four rules define correctness here, and each one is load-bearing:
  *
- *  1. **One offer per opening.** The whole evaluation runs under a Redis lock
- *     keyed on (business, service), so two slots freeing at the same instant
- *     cannot hand the same customer two holds, or two customers the same slot.
- *     A live hold on the opening is also re-checked inside the lock, because a
- *     previous evaluation's hold outlives the lock that created it.
+ *  1. **One offer per opening, and the database is what says so.** The partial
+ *     unique index `waitlist_live_offer_unique` — on (business, service,
+ *     opening) among NOTIFIED rows — is the authority. Two evaluations that
+ *     both believe an opening is free cannot both write a hold on it; the loser
+ *     is told the opening is spoken for instead of making a second promise. The
+ *     Redis lock keyed on (business, service) sits over the top as a fast path
+ *     and nothing more, and it has to be that way round: `acquireLock` proceeds
+ *     *unlocked* when Redis is unreachable, so protection resting on it alone
+ *     would quietly switch itself off during exactly the incident it was meant
+ *     to survive. Lapsed holds are released inline before an opening is offered,
+ *     because an index predicate cannot read a clock and a dead hold would
+ *     otherwise keep a live one out.
  *  2. **Fairness is FIFO within priority.** Candidates are ordered exactly like
  *     `waitlist_eligibility_idx` (priority, then arrival), and only the *first*
  *     eligible entry is served. Offering an opening to everybody who matches
@@ -21,9 +28,8 @@
  *     explicitly turned `waitlistAutoBook` on. The default is an offer with a
  *     time-limited hold, which the customer claims.
  */
-import { Op, type Transaction } from 'sequelize';
+import { Op, UniqueConstraintError, type Transaction } from 'sequelize';
 import { sequelize } from '../../config/database';
-import { env } from '../../config/env';
 import { createLogger } from '../../config/logger';
 import { RedisKeys, withLock } from '../../config/redis';
 import {
@@ -35,7 +41,7 @@ import {
   WaitlistEntry,
 } from '../../database/models';
 import { emitToWorkspace, SocketEvents } from '../../sockets';
-import { NotFoundError, isAppError } from '../../utils/errors';
+import { ConflictError, ErrorCode, NotFoundError, isAppError } from '../../utils/errors';
 import {
   addDaysToDate,
   addMinutes,
@@ -48,6 +54,7 @@ import { createBooking } from '../appointments/booking.service';
 import { AuditActions, recordAudit } from '../audit/audit.service';
 import type { RequestMetadata } from '../auth/auth.service';
 import { enqueueNotification } from '../notifications/notification.service';
+import { waitlistOfferUrl } from './waitlist.links';
 
 const log = createLogger('waitlist-matcher');
 
@@ -57,6 +64,24 @@ const log = createLogger('waitlist-matcher');
  * registry sets for advisory locks.
  */
 const EVALUATION_LOCK_TTL_MS = 15_000;
+
+/** The index that decides who owns an opening. See the migration for why. */
+const LIVE_OFFER_INDEX = 'waitlist_live_offer_unique';
+
+/**
+ * True when a write was refused because somebody else already holds this
+ * opening.
+ *
+ * Named precisely rather than treating every unique violation the same way:
+ * `waitlist_public_id_unique` and the notification outbox's `dedupe_key` index
+ * can both fire on this path, and reporting either of those as "already
+ * offered" would hide a real fault behind a plausible-looking race.
+ */
+function isLiveOfferCollision(error: unknown): boolean {
+  if (!(error instanceof UniqueConstraintError)) return false;
+  const constraint = (error as { parent?: { constraint?: string } }).parent?.constraint;
+  return constraint === LIVE_OFFER_INDEX;
+}
 
 /** The opening that just became bookable. */
 export interface WaitlistSlot {
@@ -105,6 +130,11 @@ const SYSTEM_ACTOR: WaitlistOfferActor = {
  * The row change, the audit line and the outbox row are one transaction — an
  * offer the customer was never sent must not leave a hold blocking everybody
  * else, and a hold that rolled back must not leave a claim link in an inbox.
+ *
+ * Throws a 409 when the opening is already held by another entry. That verdict
+ * comes from `waitlist_live_offer_unique` rather than from anything this
+ * process checked, which is why it is trustworthy under concurrency: see rule 1
+ * in the file header.
  */
 export async function offerSlotToEntry(input: WaitlistOfferInput): Promise<WaitlistEntry> {
   const { entry } = input;
@@ -123,16 +153,33 @@ export async function offerSlotToEntry(input: WaitlistOfferInput): Promise<Waitl
   if (!customer) throw new NotFoundError('Customer');
 
   await sequelize.transaction(async (transaction) => {
-    await entry.update(
-      {
-        status: 'NOTIFIED',
-        notifiedAt: now,
-        heldSlotStartsAt: input.startsAt,
-        holdExpiresAt,
-        notificationCount: entry.notificationCount + 1,
-      },
-      { transaction },
-    );
+    // The write the unique index guards. A rejection here means another entry
+    // took this opening between the fast-path check and this statement, and
+    // rethrowing rolls the whole transaction back — which is the point: an
+    // offer that did not happen must not leave an audit line or an email
+    // claiming it did. No savepoint is needed the way `enqueueNotification`
+    // needs one, because nothing continues after this failure.
+    try {
+      await entry.update(
+        {
+          status: 'NOTIFIED',
+          notifiedAt: now,
+          heldSlotStartsAt: input.startsAt,
+          holdExpiresAt,
+          notificationCount: entry.notificationCount + 1,
+        },
+        { transaction },
+      );
+    } catch (error) {
+      if (isLiveOfferCollision(error)) {
+        throw new ConflictError(
+          'That opening has just been offered to somebody else.',
+          ErrorCode.CONFLICT,
+          { startsAt: input.startsAt },
+        );
+      }
+      throw error;
+    }
 
     await recordAudit(
       {
@@ -223,7 +270,10 @@ async function enqueueOffer(
         startsAtLocal: formatForHumans(context.startsAt, entry.timezone),
         timezone: entry.timezone,
         holdExpiresAtLocal: formatForHumans(context.holdExpiresAt, entry.timezone),
-        claimUrl: `${env.PUBLIC_APP_URL}/waitlist/${entry.publicId}/claim`,
+        // Resolves to `GET /public/waitlist/:publicId`, which renders the offer
+        // and posts the claim. The template promises the customer somewhere to
+        // go; this is the only line that makes that promise true.
+        claimUrl: waitlistOfferUrl(entry.publicId),
       },
       // Keyed on the offer, not the entry: a retried evaluation must not send a
       // second copy, while a deliberate re-offer (which bumps the counter) must.
@@ -252,6 +302,51 @@ export async function evaluateWaitlistForSlot(input: WaitlistSlot): Promise<Wait
   );
 }
 
+/**
+ * Hands a slot the lifecycle has just freed to the waitlist, without making the
+ * caller wait for it.
+ *
+ * Exported as its own function so every way a slot can be freed reaches the
+ * waitlist the same way. A cancellation is only the most obvious of them: a
+ * rejection frees a slot the customer was still hoping for, and a reschedule
+ * frees the time the appointment moved *away* from. Each of those is one call
+ * to this, and the reason it exists is that the "fire it, log it, never let it
+ * fail the caller" handling below is exactly what gets forgotten when the third
+ * call site is written by hand.
+ *
+ * Deliberately not awaited into the caller's result. The change that freed the
+ * slot has already committed and already succeeded for the person who made it;
+ * an offer that cannot be sent must not turn their cancellation into a 500. A
+ * failure is logged, the entry stays ACTIVE, and the next opening picks it up.
+ */
+export function offerFreedSlot(input: WaitlistSlot, context: { reason: string }): void {
+  void evaluateWaitlistForSlot(input)
+    .then((entry) => {
+      if (entry) {
+        log.info(
+          {
+            businessId: input.businessId,
+            waitlistEntryId: entry.id,
+            startsAt: input.startsAt,
+            reason: context.reason,
+          },
+          'freed slot offered to a waitlisted customer',
+        );
+      }
+    })
+    .catch((error: unknown) => {
+      log.error(
+        {
+          err: error,
+          businessId: input.businessId,
+          startsAt: input.startsAt,
+          reason: context.reason,
+        },
+        'waitlist evaluation failed for a freed slot',
+      );
+    });
+}
+
 async function evaluate(input: WaitlistSlot): Promise<WaitlistEntry | null> {
   const now = new Date();
 
@@ -261,10 +356,32 @@ async function evaluate(input: WaitlistSlot): Promise<WaitlistEntry | null> {
   });
   if (!settings.waitlistEnabled) return null;
 
-  // A live hold on this opening survives the lock that created it, so it is the
-  // hold — not the lock — that stops the same time being offered twice. The
-  // test ignores which provider freed the slot: telling two customers about the
-  // same clock time for the same service is the failure worth avoiding.
+  // A lapsed hold still occupies its opening as far as the unique index is
+  // concerned, so it is released here rather than left to the maintenance
+  // sweep: one customer who ignored their email must not keep an opening
+  // unofferable until the sweep next runs. A NOTIFIED row with no expiry at all
+  // is released too — nothing writes one, and if anything ever does it must not
+  // wedge the slot for good.
+  await WaitlistEntry.update(
+    { status: 'ACTIVE', holdExpiresAt: null, heldSlotStartsAt: null },
+    {
+      where: {
+        businessId: input.businessId,
+        serviceId: input.serviceId,
+        status: 'NOTIFIED',
+        heldSlotStartsAt: input.startsAt,
+        [Op.or]: [{ holdExpiresAt: { [Op.is]: null } }, { holdExpiresAt: { [Op.lte]: now } }],
+      },
+    },
+  );
+
+  // A fast path, and only that. A live hold on this opening usually means there
+  // is nothing to do, and one cheap count says so before any candidate is
+  // loaded and tested. It cannot be the guarantee — this read and the write
+  // below are separate statements with a gap between them, which is what
+  // `waitlist_live_offer_unique` closes. The test ignores which provider freed
+  // the slot: telling two customers about the same clock time for the same
+  // service is the failure worth avoiding.
   const alreadyHeld = await WaitlistEntry.count({
     where: {
       businessId: input.businessId,
@@ -303,15 +420,33 @@ async function evaluate(input: WaitlistSlot): Promise<WaitlistEntry | null> {
     return autoBook(eligible, input);
   }
 
-  return offerSlotToEntry({
-    entry: eligible,
-    startsAt: input.startsAt,
-    endsAt: input.endsAt,
-    holdMinutes: settings.waitlistHoldMinutes,
-    actor: SYSTEM_ACTOR,
-    metadata: {},
-    now,
-  });
+  try {
+    return await offerSlotToEntry({
+      entry: eligible,
+      startsAt: input.startsAt,
+      endsAt: input.endsAt,
+      holdMinutes: settings.waitlistHoldMinutes,
+      actor: SYSTEM_ACTOR,
+      metadata: {},
+      now,
+    });
+  } catch (error) {
+    // The index refused the hold: a concurrent evaluation offered this exact
+    // opening first. An ordinary race, handled the way `autoBook` handles
+    // losing the slot — there is simply nothing left to offer.
+    if (isAppError(error) && error.statusCode === 409) {
+      log.info(
+        {
+          businessId: input.businessId,
+          waitlistEntryId: eligible.id,
+          startsAt: input.startsAt,
+        },
+        'waitlist offer lost the opening to a concurrent evaluation',
+      );
+      return null;
+    }
+    throw error;
+  }
 }
 
 /**

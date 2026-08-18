@@ -18,6 +18,11 @@
  *  4. Audit metadata never carries a customer's email or the body of a note.
  *     Audit rows are append-only, so anything copied into them outlives the
  *     record — including a record deleted precisely because the person asked.
+ *  5. Every read takes a `CustomerScope` alongside the tenant. `customers:read`
+ *     is the whole address book; `customers:read:assigned` is the people booked
+ *     with this provider and nobody else. The routes admit either permission
+ *     because the difference is a property of the rows, so the narrowing has to
+ *     happen here — see the Visibility section below.
  */
 import { Op, UniqueConstraintError, type Transaction } from 'sequelize';
 import { sequelize } from '../../config/database';
@@ -43,7 +48,8 @@ import { newCustomerPublicId } from '../../utils/ids';
 import { isValidTimezone } from '../../utils/time';
 import { AuditActions, recordAudit } from '../audit/audit.service';
 import type { RequestMetadata } from '../auth/auth.service';
-import { PERMISSIONS } from '../auth/permissions';
+import type { TenantContext } from '../auth/context';
+import { PERMISSIONS, customerVisibility } from '../auth/permissions';
 import type {
   CreateCustomerBody,
   ListCustomerAppointmentsQuery,
@@ -117,6 +123,155 @@ function escapeLike(term: string): string {
   return term.replace(/[\\%_]/g, (character) => `\\${character}`);
 }
 
+// ---------------------------------------------------------------------------
+// Visibility
+// ---------------------------------------------------------------------------
+
+/**
+ * The narrowing a caller's permissions impose on every customer read.
+ *
+ * `NOTHING` is not the same as being refused: it is a member who may read the
+ * customers booked with them but is not a bookable provider, so nobody is
+ * booked with them and the honest answer is an empty one rather than an error
+ * about a permission they do hold.
+ */
+export type CustomerScope =
+  { kind: 'ALL' } | { kind: 'ASSIGNED'; staffProfileId: string } | { kind: 'NOTHING' };
+
+/**
+ * Resolves the caller's scope, refusing outright when they may see no customers
+ * at all.
+ *
+ * Only the reads take a scope. The write routes require `customers:manage`,
+ * which no role holds without the unscoped `customers:read`, so running this on
+ * them would add a second failure mode without narrowing anything.
+ */
+export function scopeOf(tenant: TenantContext): CustomerScope {
+  const visibility = customerVisibility(tenant.permissions);
+
+  if (visibility === 'NONE') {
+    throw new ForbiddenError('Your role does not allow viewing customers.', undefined, {
+      required: [PERMISSIONS.CUSTOMERS_READ, PERMISSIONS.CUSTOMERS_READ_ASSIGNED],
+    });
+  }
+  if (visibility === 'ALL') return { kind: 'ALL' };
+
+  return tenant.staffProfileId !== null
+    ? { kind: 'ASSIGNED', staffProfileId: tenant.staffProfileId }
+    : { kind: 'NOTHING' };
+}
+
+/**
+ * The appointment rows a scope may see, as a WHERE fragment.
+ *
+ * A provider reading someone's history gets their own share of it, not the
+ * whole thing. Anything wider would be a way around `appointments:read:own` —
+ * the very permission the same member holds one module over — reached by asking
+ * about the customer instead of about the diary.
+ */
+function appointmentScopeWhere(scope: CustomerScope): { staffProfileId?: string } {
+  return scope.kind === 'ASSIGNED' ? { staffProfileId: scope.staffProfileId } : {};
+}
+
+/**
+ * Whether this provider has any appointment with this customer.
+ *
+ * Two probes rather than one `$participants.customerId$` disjunct, and the
+ * reason is the same one `matchingCustomerIds` gives next door in
+ * appointments.service.ts: `findOne` applies a LIMIT, Sequelize moves the limit
+ * into a subquery, and the join the `$nested$` reference needs is left outside
+ * it — the query does not fail to match, it fails to parse.
+ *
+ * Both are index-only probes and the second is skipped whenever the first
+ * matches, which is the overwhelmingly common case. Participants are tested at
+ * all because a class is a single appointment with many attendees, and every
+ * one of them is somebody the person running it has in front of them.
+ */
+async function isBookedWith(
+  businessId: string,
+  staffProfileId: string,
+  customerId: string,
+): Promise<boolean> {
+  const own = await Appointment.findOne({
+    where: { businessId, staffProfileId, customerId },
+    attributes: ['id'],
+  });
+  if (own) return true;
+
+  // `belongsTo` this time, so the join is a plain INNER and no subquery is
+  // built to strand it.
+  const participation = await AppointmentParticipant.findOne({
+    where: { customerId },
+    attributes: ['customerId'],
+    include: [
+      {
+        model: Appointment,
+        as: 'appointment',
+        attributes: [],
+        required: true,
+        where: { businessId, staffProfileId },
+      },
+    ],
+  });
+  return participation !== null;
+}
+
+/**
+ * Ids of every customer this provider has an appointment with.
+ *
+ * Resolved as its own query rather than as a join predicate, for the reason
+ * appointments.service.ts resolves its search matches the same way:
+ * `findAndCountAll` with a limit builds a subquery, and a required include
+ * would both fail to resolve inside it and return a customer once per
+ * appointment they hold — silently corrupting the page count.
+ *
+ * Deliberately uncapped, unlike the search-term expansion next door. That cap
+ * bounds a heuristic; this is a visibility boundary, and a cap here would
+ * quietly hide the customers of any provider busier than the limit. Only ids
+ * cross the wire, and the set is bounded by one person's own book.
+ */
+async function assignedCustomerIds(businessId: string, staffProfileId: string): Promise<string[]> {
+  const [ownRows, participantRows] = await Promise.all([
+    Appointment.findAll({
+      where: { businessId, staffProfileId },
+      attributes: ['customerId'],
+      raw: true,
+    }),
+    AppointmentParticipant.findAll({
+      attributes: ['customerId'],
+      include: [
+        {
+          model: Appointment,
+          as: 'appointment',
+          attributes: [],
+          required: true,
+          where: { businessId, staffProfileId },
+        },
+      ],
+      raw: true,
+    }),
+  ]);
+
+  const ids = new Set<string>();
+  // Nullable on the appointment: a held slot with nobody attached to it yet.
+  for (const row of ownRows) if (row.customerId) ids.add(row.customerId);
+  for (const row of participantRows) ids.add(row.customerId);
+  return [...ids];
+}
+
+/**
+ * The scope as a customer-id filter, or `null` when the caller may see
+ * everybody. An empty array is a real answer — this provider has nobody.
+ */
+async function scopedCustomerIds(
+  businessId: string,
+  scope: CustomerScope,
+): Promise<string[] | null> {
+  if (scope.kind === 'ALL') return null;
+  if (scope.kind === 'NOTHING') return [];
+  return assignedCustomerIds(businessId, scope.staffProfileId);
+}
+
 /**
  * The one place a customer is loaded by id.
  *
@@ -134,6 +289,29 @@ async function findCustomerOrThrow(
     transaction,
   });
   if (!customer) throw new NotFoundError('Customer');
+  return customer;
+}
+
+/**
+ * The same, narrowed by visibility: a customer this caller is allowed to see,
+ * or the identical 404 a foreign id gets.
+ *
+ * 404 rather than 403, for the reason rule 1 gives — a 403 would confirm the
+ * record exists, which is enough to walk the id space and learn who else the
+ * workspace books.
+ */
+async function findVisibleCustomerOrThrow(
+  businessId: string,
+  scope: CustomerScope,
+  customerId: string,
+): Promise<Customer> {
+  if (scope.kind === 'NOTHING') throw new NotFoundError('Customer');
+
+  const customer = await findCustomerOrThrow(businessId, customerId);
+  if (scope.kind === 'ASSIGNED') {
+    const booked = await isBookedWith(businessId, scope.staffProfileId, customer.id);
+    if (!booked) throw new NotFoundError('Customer');
+  }
   return customer;
 }
 
@@ -235,13 +413,23 @@ async function assertLocationInTenant(
 
 export async function listCustomers(
   businessId: string,
+  scope: CustomerScope,
   query: ListCustomersQuery,
 ): Promise<CustomerPage> {
   const term = query.search ? `%${escapeLike(query.search)}%` : null;
 
+  const visibleIds = await scopedCustomerIds(businessId, scope);
+  // Short-circuited rather than sent as an empty `IN ()`: the answer is already
+  // known, and an empty list is a legitimate state for a provider with no
+  // bookings yet, not an error.
+  if (visibleIds !== null && visibleIds.length === 0) return { rows: [], totalItems: 0 };
+
   const { rows, count } = await Customer.findAndCountAll({
     where: {
       businessId,
+      // First, so the caller's scope always wins the key: a filter below can
+      // narrow who is returned but can never widen it.
+      ...(visibleIds !== null ? { id: { [Op.in]: visibleIds } } : {}),
       ...(query.status !== undefined ? { status: query.status } : {}),
       ...(query.tag !== undefined ? { tags: { [Op.contains]: [query.tag] } } : {}),
       ...(term
@@ -269,13 +457,20 @@ export async function listCustomers(
 }
 
 /**
- * One customer plus the head of their history.
+ * One customer plus the head of their history — the part of it this caller may
+ * see, which for a scoped provider is their own appointments with the person.
  *
  * The appointments are fetched in their own tenant-scoped query rather than as
  * a nested include: the `businessId` filter is then explicit on both reads, and
  * a limited include would otherwise have to be a separate query anyway.
  */
-export async function getCustomer(businessId: string, customerId: string): Promise<CustomerDetail> {
+export async function getCustomer(
+  businessId: string,
+  scope: CustomerScope,
+  customerId: string,
+): Promise<CustomerDetail> {
+  if (scope.kind === 'NOTHING') throw new NotFoundError('Customer');
+
   const customer = await Customer.findOne({
     where: { id: customerId, businessId },
     include: [
@@ -285,8 +480,15 @@ export async function getCustomer(businessId: string, customerId: string): Promi
   });
   if (!customer) throw new NotFoundError('Customer');
 
+  // Same 404 as a foreign id: a member scoped to their own bookings must not be
+  // able to tell "not yours" apart from "does not exist".
+  if (scope.kind === 'ASSIGNED') {
+    const booked = await isBookedWith(businessId, scope.staffProfileId, customer.id);
+    if (!booked) throw new NotFoundError('Customer');
+  }
+
   const recentAppointments = await Appointment.findAll({
-    where: { businessId, customerId: customer.id },
+    where: { businessId, customerId: customer.id, ...appointmentScopeWhere(scope) },
     attributes: [...APPOINTMENT_SUMMARY_ATTRIBUTES],
     include: APPOINTMENT_INCLUDES,
     // Newest start time first: anything still upcoming heads the panel and the
@@ -302,21 +504,23 @@ export async function getCustomer(businessId: string, customerId: string): Promi
 }
 
 /**
- * Full booking history, paginated.
+ * Booking history, paginated — full for a caller who may see the whole address
+ * book, and their own share of it for one scoped to their assignments.
  *
- * The customer is resolved first so a foreign id answers 404 before any
- * appointment is read, and the appointment query carries the tenant filter of
- * its own regardless.
+ * The customer is resolved first so a foreign or invisible id answers 404
+ * before any appointment is read, and the appointment query carries the tenant
+ * and scope filters of its own regardless.
  */
 export async function listCustomerAppointments(
   businessId: string,
+  scope: CustomerScope,
   customerId: string,
   query: ListCustomerAppointmentsQuery,
 ): Promise<CustomerAppointmentPage> {
-  const customer = await findCustomerOrThrow(businessId, customerId);
+  const customer = await findVisibleCustomerOrThrow(businessId, scope, customerId);
 
   const { rows, count } = await Appointment.findAndCountAll({
-    where: { businessId, customerId: customer.id },
+    where: { businessId, customerId: customer.id, ...appointmentScopeWhere(scope) },
     attributes: [...APPOINTMENT_SUMMARY_ATTRIBUTES],
     include: APPOINTMENT_INCLUDES,
     order: [

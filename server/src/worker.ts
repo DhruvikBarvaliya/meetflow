@@ -15,6 +15,7 @@ import { env } from './config/env';
 import { logger } from './config/logger';
 import { closeRedis, createRedisConnection } from './config/redis';
 import { JOB_NAMES, QUEUE_NAMES, closeQueues, registerRepeatableJobs } from './jobs/queues';
+import { sendOwnerDailyDigests } from './jobs/processors/digest.processor';
 import {
   advanceInProgress,
   expireWaitlistHolds,
@@ -79,6 +80,8 @@ export async function startWorkers(options: StartWorkersOptions): Promise<Worker
           return purgeExpiredTokens();
         case JOB_NAMES.purgeIdempotencyKeys:
           return purgeIdempotencyKeys();
+        case JOB_NAMES.sendOwnerDailyDigests:
+          return sendOwnerDailyDigests();
         default:
           log.warn({ jobName: job.name }, 'unhandled maintenance job');
           return undefined;
