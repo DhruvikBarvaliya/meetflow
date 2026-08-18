@@ -31,7 +31,11 @@
     "skipLibCheck": true,
     "pretty": true,
 
-    "baseUrl": ".",
+    /* No `baseUrl`: since TypeScript 4.4 a `paths` entry that is already
+       relative resolves against this file's directory, so declaring one adds a
+       second way to write a module specifier and nothing else. Vite resolves
+       the same alias independently — see the `resolve.alias` in vite.config.ts,
+       which is what actually rewrites these imports at build time. */
     "paths": {
       "@/*": ["./src/*"]
     }
