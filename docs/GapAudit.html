@@ -1,0 +1,786 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MeetFlow Gap Audit</title>
+<meta name="description" content="A 53-finding audit of the MeetFlow repository against the original master prompt, ordered by severity, with evidence for each.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+</head>
+<body>
+<style>
+  :root {
+    --ground: #fafafc;
+    --surface: #ffffff;
+    --sunk: #f2f3f7;
+    --ink: #14161f;
+    --ink-2: #3e4356;
+    --ink-3: #6b7186;
+    --rule: #e3e5ed;
+    --rule-2: #c9cdd9;
+    --accent: #2f3e63;
+    --crit: #b42318;
+    --crit-bg: #fef3f2;
+    --sec: #b54708;
+    --sec-bg: #fffaeb;
+    --contract: #175cd3;
+    --contract-bg: #eff4ff;
+    --hyg: #5f6678;
+    --hyg-bg: #f2f3f7;
+    --ok: #067647;
+    --ok-bg: #ecfdf3;
+    --shadow: 0 1px 2px rgba(20, 22, 31, .06), 0 8px 24px -16px rgba(20, 22, 31, .18);
+
+    --display: "Bricolage Grotesque", "Segoe UI Variable Display", "Segoe UI Semibold", system-ui, sans-serif;
+    --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, "Courier New", monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0f1117;
+      --surface: #171a22;
+      --sunk: #1e222c;
+      --ink: #e8eaf0;
+      --ink-2: #b4b9c8;
+      --ink-3: #868c9e;
+      --rule: #262b36;
+      --rule-2: #39404f;
+      --accent: #9db0e0;
+      --crit: #f97066;
+      --crit-bg: #2c1210;
+      --sec: #fdb022;
+      --sec-bg: #2b1c07;
+      --contract: #84adff;
+      --contract-bg: #101c33;
+      --hyg: #98a2b3;
+      --hyg-bg: #1e222c;
+      --ok: #47cd89;
+      --ok-bg: #072f1e;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px -16px rgba(0, 0, 0, .7);
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground: #0f1117;
+    --surface: #171a22;
+    --sunk: #1e222c;
+    --ink: #e8eaf0;
+    --ink-2: #b4b9c8;
+    --ink-3: #868c9e;
+    --rule: #262b36;
+    --rule-2: #39404f;
+    --accent: #9db0e0;
+    --crit: #f97066;
+    --crit-bg: #2c1210;
+    --sec: #fdb022;
+    --sec-bg: #2b1c07;
+    --contract: #84adff;
+    --contract-bg: #101c33;
+    --hyg: #98a2b3;
+    --hyg-bg: #1e222c;
+    --ok: #47cd89;
+    --ok-bg: #072f1e;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .4), 0 8px 24px -16px rgba(0, 0, 0, .7);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 68rem;
+    margin: 0 auto;
+    padding: 3.5rem 1.5rem 6rem;
+  }
+
+  /* ---------- masthead ---------- */
+
+  .mast { display: flex; flex-direction: column; gap: 1rem; padding-bottom: 2rem; border-bottom: 2px solid var(--ink); }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: .75rem;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    display: flex;
+    flex-wrap: wrap;
+    gap: .5rem 1.25rem;
+  }
+
+  h1 {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: clamp(2.4rem, 6vw, 3.9rem);
+    line-height: 1.02;
+    letter-spacing: -.025em;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .standfirst {
+    font-size: clamp(1.05rem, 2vw, 1.2rem);
+    color: var(--ink-2);
+    max-width: 46ch;
+    margin: 0;
+  }
+
+  /* ---------- verdict ---------- */
+
+  .verdict {
+    margin: 2.5rem 0 0;
+    padding: 1.5rem 1.75rem;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+    border-left: 4px solid var(--crit);
+    border-radius: 3px;
+    box-shadow: var(--shadow);
+  }
+  .verdict h2 { margin-top: 0; }
+  .verdict p:last-child { margin-bottom: 0; }
+
+  /* ---------- tallies ---------- */
+
+  .tally {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(9.5rem, 1fr));
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    margin: 2.5rem 0;
+    overflow: hidden;
+  }
+  .tally div { background: var(--surface); padding: 1.1rem 1.25rem; }
+  .tally .n {
+    font-family: var(--display);
+    font-size: 2.1rem;
+    font-weight: 700;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    display: block;
+  }
+  .tally .l {
+    font-family: var(--mono);
+    font-size: .7rem;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin-top: .45rem;
+    display: block;
+  }
+  .t-crit .n { color: var(--crit); }
+  .t-sec .n { color: var(--sec); }
+  .t-con .n { color: var(--contract); }
+  .t-hyg .n { color: var(--hyg); }
+  .t-ok .n { color: var(--ok); }
+
+  /* ---------- type ---------- */
+
+  h2 {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: clamp(1.5rem, 3vw, 1.95rem);
+    letter-spacing: -.018em;
+    line-height: 1.15;
+    margin: 3.5rem 0 .5rem;
+    text-wrap: balance;
+  }
+
+  h3 {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 1.12rem;
+    letter-spacing: -.01em;
+    margin: 2rem 0 .4rem;
+  }
+
+  p { max-width: 68ch; }
+
+  .lede { color: var(--ink-2); margin-top: 0; max-width: 66ch; }
+
+  code, .path {
+    font-family: var(--mono);
+    font-size: .855em;
+    background: var(--sunk);
+    padding: .1em .36em;
+    border-radius: 2px;
+    color: var(--ink-2);
+    overflow-wrap: anywhere;
+  }
+
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  /* ---------- findings register ---------- */
+
+  .reg { display: flex; flex-direction: column; gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: 3px; overflow: hidden; margin-top: 1.25rem; }
+
+  .find {
+    background: var(--surface);
+    display: grid;
+    grid-template-columns: 3.25rem 1fr;
+    gap: 0 1rem;
+    padding: 1.15rem 1.35rem 1.25rem 0;
+    border-left: 3px solid transparent;
+  }
+
+  .find > .num {
+    font-family: var(--mono);
+    font-size: .8rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink-3);
+    text-align: right;
+    padding-top: .18rem;
+  }
+
+  .find h4 {
+    font-family: var(--body);
+    font-weight: 600;
+    font-size: 1rem;
+    margin: 0 0 .35rem;
+    line-height: 1.4;
+  }
+
+  .find p { margin: 0 0 .55rem; font-size: .935rem; color: var(--ink-2); max-width: 72ch; }
+  .find p:last-child { margin-bottom: 0; }
+
+  .ev {
+    font-family: var(--mono);
+    font-size: .78rem;
+    color: var(--ink-3);
+    display: block;
+    max-width: none;
+    overflow-wrap: anywhere;
+  }
+
+  .c-crit { border-left-color: var(--crit); }
+  .c-sec { border-left-color: var(--sec); }
+  .c-con { border-left-color: var(--contract); }
+  .c-hyg { border-left-color: var(--hyg); }
+
+  /* ---------- chips ---------- */
+
+  .chips { display: flex; flex-wrap: wrap; gap: .4rem; margin-bottom: .5rem; }
+
+  .chip {
+    font-family: var(--mono);
+    font-size: .68rem;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    padding: .18rem .5rem;
+    border-radius: 2px;
+    white-space: nowrap;
+    border: 1px solid transparent;
+  }
+  .chip-crit { background: var(--crit-bg); color: var(--crit); border-color: var(--crit); }
+  .chip-sec { background: var(--sec-bg); color: var(--sec); border-color: var(--sec); }
+  .chip-con { background: var(--contract-bg); color: var(--contract); border-color: var(--contract); }
+  .chip-hyg { background: var(--hyg-bg); color: var(--hyg); border-color: var(--rule-2); }
+  .chip-ok { background: var(--ok-bg); color: var(--ok); border-color: var(--ok); }
+  .chip-eff { background: transparent; color: var(--ink-3); border-color: var(--rule-2); }
+
+  /* ---------- tables ---------- */
+
+  .scroll { overflow-x: auto; margin: 1.25rem 0; border: 1px solid var(--rule); border-radius: 3px; }
+
+  table { border-collapse: collapse; width: 100%; font-size: .9rem; background: var(--surface); }
+  th, td { text-align: left; padding: .7rem .9rem; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  thead th {
+    font-family: var(--mono);
+    font-size: .7rem;
+    letter-spacing: .07em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    background: var(--sunk);
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td.n { font-family: var(--mono); font-variant-numeric: tabular-nums; color: var(--ink-3); white-space: nowrap; }
+
+  /* ---------- disclosure ---------- */
+
+  details {
+    border: 1px solid var(--rule);
+    border-radius: 3px;
+    background: var(--surface);
+    margin: 1.25rem 0;
+    overflow: hidden;
+  }
+  summary {
+    cursor: pointer;
+    padding: .85rem 1.1rem;
+    font-weight: 600;
+    font-size: .95rem;
+    background: var(--sunk);
+    list-style: none;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary::before { content: "▸ "; color: var(--ink-3); }
+  details[open] summary::before { content: "▾ "; }
+  .details-body { padding: .25rem 1.1rem 1.1rem; }
+  .details-body ul { margin: .75rem 0; padding-left: 1.2rem; }
+  .details-body li { margin-bottom: .5rem; color: var(--ink-2); font-size: .93rem; }
+
+  ul.plain { padding-left: 1.15rem; }
+  ul.plain li { margin-bottom: .5rem; color: var(--ink-2); max-width: 68ch; }
+
+  footer {
+    margin-top: 4rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid var(--rule);
+    font-family: var(--mono);
+    font-size: .76rem;
+    color: var(--ink-3);
+    line-height: 1.7;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+
+  @media (max-width: 34rem) {
+    .find { grid-template-columns: 1fr; padding-left: .9rem; padding-right: .9rem; }
+    .find > .num { text-align: left; padding-top: 0; margin-bottom: .3rem; }
+  }
+
+  .theme-btn {
+    position: fixed;
+    top: 1rem;
+    right: 1rem;
+    z-index: 10;
+    font-family: var(--mono);
+    font-size: .7rem;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    padding: .5rem .7rem;
+    background: var(--surface);
+    color: var(--ink-2);
+    border: 1px solid var(--rule-2);
+    border-radius: 3px;
+    cursor: pointer;
+    box-shadow: var(--shadow);
+  }
+  .theme-btn:hover { color: var(--ink); border-color: var(--ink-3); }
+  .theme-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  @media print { .theme-btn { display: none; } }
+</style>
+
+<div class="wrap">
+
+  <header class="mast">
+    <div class="eyebrow">
+      <span>MeetFlow</span>
+      <span>Audit vs. MEETFLOW_ONLY_MASTER_PROMPT.md</span>
+      <span>develop @ 0dbe28c</span>
+    </div>
+    <h1>What the spec asked for, and what is actually there</h1>
+    <p class="standfirst">Eight auditors, working from the original 2,081-line specification rather than from anyone's memory of it. Fifty-three findings.</p>
+  </header>
+
+  <section class="verdict">
+    <h2 style="margin-top:0">Verdict</h2>
+    <p><strong>Not complete against the spec's own release checklist</strong> — but the incompleteness sits at the edges, not the core. The engineering that is hard to fake is done properly: booking concurrency is enforced by real PostgreSQL exclusion constraints and proven by a ten-way race test, DST is handled in both directions, tenant reads answer 404 rather than 403, and 130 mounted routes match 130 OpenAPI operations and 130 Postman requests exactly.</p>
+    <p>What fails is the last mile. Three of the four workspace roles cannot be reached in a fresh deployment. One advertised subsystem has a model, a migration, a processor, a queue and a dedicated worker — and no possible way to execute. The tenant's own audit trail is write-only. And the repository's own quality gates were red.</p>
+  </section>
+
+  <div class="tally">
+    <div class="t-crit"><span class="n">7</span><span class="l">Tier 1 · blocking</span></div>
+    <div class="t-sec"><span class="n">9</span><span class="l">Tier 2 · security</span></div>
+    <div class="t-con"><span class="n">19</span><span class="l">Tier 3 · contract &amp; UX</span></div>
+    <div class="t-hyg"><span class="n">18</span><span class="l">Tier 4 · coverage &amp; docs</span></div>
+    <div class="t-ok"><span class="n">3</span><span class="l">Fixed already</span></div>
+  </div>
+
+  <h2>The finding I have to own first</h2>
+  <p class="lede">I reported “lint clean” three times today. It was not.</p>
+
+  <p>I ran <code>npm run lint</code> inside <code>server/</code> and <code>client/</code> — never from the repository root, which is where the real gate lives and where <code>e2e/</code> and <code>server/scripts/</code> get linted. The root gate was failing with <strong>8 errors, every one of them introduced by me today</strong>:</p>
+
+  <div class="scroll">
+    <table>
+      <thead>
+        <tr><th>Where</th><th>Error</th><th>Cause</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="n">e2e/tests/admin.spec.ts:139</td>
+          <td>no-irregular-whitespace</td>
+          <td>I typed literal U+00A0 and U+202F characters into a regex character class instead of writing them as escapes.</td>
+        </tr>
+        <tr>
+          <td class="n">server/scripts/db-reset.mjs</td>
+          <td>no-undef × 7</td>
+          <td><code>eslint.config.mjs</code> scoped Node globals to <code>scripts/**</code>, which does not match <code>server/scripts/**</code> — so the file I added this morning had no <code>process</code> or <code>console</code>.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <p><code>npm run format:check</code> was also failing on four files. The same mistake underneath: I checked the specific files I had edited by hand rather than running the gate the repository actually defines. <strong>All fixed and verified green.</strong> The Postman staleness you spotted was the same failure mode — checking narrowly, then reporting broadly.</p>
+
+  <h2>Tier 1 — breaks the spec's definition of success</h2>
+  <p class="lede">These are the ones that would show up in a demo or a client audit.</p>
+
+  <div class="reg">
+
+    <article class="find c-crit">
+      <div class="num">01</div>
+      <div>
+        <div class="chips">
+          <span class="chip chip-crit">Blocking</span>
+          <span class="chip chip-eff">Effort: medium</span>
+        </div>
+        <h4>No member can ever be added to a workspace</h4>
+        <p><code>Membership.create</code> has exactly one call site in the entire codebase — workspace creation. There is no invite endpoint, no role-change endpoint, no removal endpoint. <strong>Manager, Receptionist and Staff are unreachable outside the seeder</strong>, so the RBAC engine that the tests prove correct has no way to be exercised in a real deployment. The permissions <code>members:invite</code>, <code>members:update</code>, <code>members:remove</code> and <code>roles:manage</code> are granted to roles and enforced by zero routes.</p>
+        <p class="ev">server/src/modules/businesses/business.service.ts:182 — sole call site · business.routes.ts exposes only GET /members · verified directly</p>
+      </div>
+    </article>
+
+    <article class="find c-crit">
+      <div class="num">02</div>
+      <div>
+        <div class="chips">
+          <span class="chip chip-crit">Blocking</span>
+          <span class="chip chip-eff">Effort: large</span>
+        </div>
+        <h4>The Customer role does not exist as an identity</h4>
+        <p><code>User.platformRole</code> is only <code>ADMIN | USER</code>. The customer portal lives under <code>/app</code>, and <code>ProtectedRoute</code> sends any signed-in user with zero memberships to <code>/create-workspace</code>. The net effect is that the customer dashboard the spec devotes a section to is reachable <em>only</em> by an owner or manager whose email happens to match a customer record. The README's claim that seeded customers have portal accounts is misleading as written.</p>
+        <p class="ev">client/src/components/layout/ProtectedRoute.tsx:64-66 · client/src/pages/customer/useMyCustomer.ts:36</p>
+      </div>
+    </article>
+
+    <article class="find c-crit">
+      <div class="num">03</div>
+      <div>
+        <div class="chips">
+          <span class="chip chip-crit">Blocking</span>
+          <span class="chip chip-eff">Effort: small</span>
+        </div>
+        <h4>The workspace audit trail is write-only</h4>
+        <p>Eighteen services write audit rows and no tenant can read them. The spec names <code>GET /api/v1/audit-logs</code>; only the platform-admin version exists. <code>audit:read</code> is granted to Business Owner and Manager and enforced by no route at all. The reader already exists in the admin service and could be reused almost verbatim.</p>
+        <p class="ev">no /audit-logs on the management router — verified directly · reader exists at admin.service.ts:1298-1345</p>
+      </div>
+    </article>
+
+    <article class="find c-crit">
+      <div class="num">04</div>
+      <div>
+        <div class="chips">
+          <span class="chip chip-crit">Blocking</span>
+          <span class="chip chip-eff">Effort: small to disclose</span>
+        </div>
+        <h4>The webhook subsystem cannot run, and is listed as shipped</h4>
+        <p><code>fanOutEvent</code> has zero callers repo-wide. There is no webhooks module, no router, and no way to create an endpoint except by hand in psql — which the spec explicitly forbids. A dedicated worker consumes a queue nothing writes to. Meanwhile <code>Changelog.md:57</code> lists “webhook delivery with HMAC signing” under <strong>Added</strong>.</p>
+        <p>This is the only place in the repository where a document claims something the code cannot do, and it is the one finding that undercuts an otherwise unusually honest posture.</p>
+        <p class="ev">grep -rn fanOutEvent → definition only, webhook.processor.ts:131 — verified directly</p>
+      </div>
+    </article>
+
+    <article class="find c-crit">
+      <div class="num">05</div>
+      <div>
+        <div class="chips">
+          <span class="chip chip-ok">Fixed</span>
+          <span class="chip chip-eff">Effort: small</span>
+        </div>
+        <h4>The repository's own quality gates were failing</h4>
+        <p>Described in full above. <code>npm run lint</code> → 8 errors; <code>npm run format:check</code> → 4 files. Both green now, and <code>docs/openapi.json</code> has been added to <code>.prettierignore</code> alongside the Postman collection, since both are generated by the same script pair and reformatting either would break the gate on every regeneration.</p>
+        <p class="ev">fixed in this session · root gate re-run clean</p>
+      </div>
+    </article>
+
+    <article class="find c-crit">
+      <div class="num">06</div>
+      <div>
+        <div class="chips">
+          <span class="chip chip-crit">Blocking</span>
+          <span class="chip chip-eff">Effort: small</span>
+        </div>
+        <h4>No CI, and no enforcement of any gate</h4>
+        <p><code>.github/</code> does not exist. <code>.git/hooks/</code> holds only samples. There is no husky, no lefthook, no <code>prepare</code> script. <code>scripts/secret-scan.mjs</code> documents itself as a pre-commit hook and nothing invokes it. Combined with finding 05, this is precisely why lint sat red without anyone noticing — including me.</p>
+        <p class="ev">absence of .github/ and active hooks — verified directly</p>
+      </div>
+    </article>
+
+    <article class="find c-crit">
+      <div class="num">07</div>
+      <div>
+        <div class="chips">
+          <span class="chip chip-crit">Blocking</span>
+          <span class="chip chip-eff">Effort: small</span>
+        </div>
+        <h4><code>docs/ProductRequirements.md</code> is missing</h4>
+        <p>The one document required by both §10 and §118E that is absent — and the one that would have carried the specification into the repository, where an audit like this would not need to reconstruct it from a chat transcript.</p>
+        <p class="ev">ls docs/ — verified directly</p>
+      </div>
+    </article>
+
+  </div>
+
+  <h2>Tier 2 — security and correctness</h2>
+  <p class="lede">Nine defects. Two are genuine security holes; the rest are correctness bugs with user-visible consequences.</p>
+
+  <div class="reg">
+
+    <article class="find c-sec">
+      <div class="num">08</div>
+      <div>
+        <div class="chips">
+          <span class="chip chip-sec">Security</span>
+          <span class="chip chip-eff">Effort: small</span>
+        </div>
+        <h4>HTML injection into outgoing email</h4>
+        <p>At enqueue, template placeholders are substituted <strong>unescaped</strong>. At delivery, <code>textToHtml</code> re-runs the renderer with escaping on the <em>already-substituted</em> string — so it escapes only placeholders that no longer exist — then interpolates each line raw into <code>&lt;p&gt;${line}&lt;/p&gt;</code>. A public booking with a first name of <code>&lt;img src=x onerror=…&gt;</code> lands in the recipient's inbox as live markup.</p>
+        <p>The escaping is real; it simply runs one render too late. <code>docs/NotificationArchitecture.md</code> claims the protection that the code does not provide.</p>
+        <p class="ev">templates.ts:359-372 · notification.service.ts:100-110 · traced end-to-end and confirmed</p>
+      </div>
+    </article>
+
+    <article class="find c-sec">
+      <div class="num">09</div>
+      <div>
+        <div class="chips">
+          <span class="chip chip-sec">Security</span>
+          <span class="chip chip-eff">Effort: small</span>
+        </div>
+        <h4><code>EMAIL_PROVIDER=console</code> is not blocked in production</h4>
+        <p>The env layer has production guardrails for seeding, rate limiting, log formatting, placeholder JWT secrets and insecure origins — and none for the email provider, which defaults to <code>console</code>. A production deploy on defaults marks every confirmation and every reminder <code>SENT</code> while sending nothing at all.</p>
+        <p class="ev">server/src/config/env.ts:116 — default console, no production guard — verified directly</p>
+      </div>
+    </article>
+
+    <article class="find c-sec">
+      <div class="num">10</div>
+      <div>
+        <div class="chips">
+          <span class="chip chip-sec">Security</span>
+          <span class="chip chip-eff">Effort: small</span>
+        </div>
+        <h4>Auth rate limiting does not stop password spraying</h4>
+        <p>The bucket key is <code>IP|email</code>, so one host can try one password against unlimited accounts — each email is a fresh bucket, and the per-account lockout (one failure each) never trips. The comment directly above the resolver claims the opposite. The same resolver on <code>/auth/register</code> permits unbounded mass account creation from a single IP, and the limiter <strong>fails open</strong> on internal error.</p>
+        <p class="ev">server/src/middleware/rateLimit.ts:137-150 — read and confirmed</p>
+      </div>
+    </article>
+
+    <article class="find c-sec">
+      <div class="num">11</div>
+      <div>
+        <div class="chips"><span class="chip chip-sec">Security</span><span class="chip chip-eff">Effort: small</span></div>
+        <h4>Socket sessions survive “log out everywhere”</h4>
+        <p><code>authenticateSocket</code> re-reads the user and membership but never the refresh-token family, so a revoked session keeps receiving live workspace events until its access token expires. The HTTP path closes this hole; the socket path does not.</p>
+        <p class="ev">grep RefreshToken server/src/sockets/index.ts → no match</p>
+      </div>
+    </article>
+
+    <article class="find c-sec">
+      <div class="num">12</div>
+      <div>
+        <div class="chips"><span class="chip chip-sec">Correctness</span><span class="chip chip-eff">Effort: small</span></div>
+        <h4>The booking horizon is not enforced at confirmation</h4>
+        <p><code>maxHorizonDays</code> clamps the availability <em>search</em> range and is never re-checked at commit. A caller supplying an explicit staff id can book years past the horizon. No test covers it.</p>
+        <p class="ev">availability.service.ts — horizon absent from verifySlot and createBooking</p>
+      </div>
+    </article>
+
+    <article class="find c-sec">
+      <div class="num">13</div>
+      <div>
+        <div class="chips"><span class="chip chip-sec">Correctness</span><span class="chip chip-eff">Effort: small–medium</span></div>
+        <h4>Reschedule and reject leave stale reminders queued</h4>
+        <p>Only the cancel path touches pending notifications. A rescheduled customer keeps reminders at the <strong>old</strong> time, carrying a payload frozen at booking — reminded at the wrong hour about the wrong appointment. A rejected customer is still reminded about a booking that was refused.</p>
+        <p class="ev">lifecycle.service.ts:549 is the only Notification.update</p>
+      </div>
+    </article>
+
+    <article class="find c-sec">
+      <div class="num">14</div>
+      <div>
+        <div class="chips"><span class="chip chip-sec">Correctness</span><span class="chip chip-eff">Effort: medium</span></div>
+        <h4>Shared resources can be oversubscribed by a reschedule</h4>
+        <p>Reschedule moves resource rows with a bare <code>UPDATE</code>, skipping the <code>SELECT … FOR UPDATE</code> capacity check. Exclusive resources stay protected by the exclusion constraint; resources with <code>capacity &gt; 1</code> do not.</p>
+        <p class="ev">lifecycle.service.ts:329-332 — auditor's line cite, not independently re-verified</p>
+      </div>
+    </article>
+
+    <article class="find c-sec">
+      <div class="num">15</div>
+      <div>
+        <div class="chips"><span class="chip chip-sec">Correctness</span><span class="chip chip-eff">Effort: small–medium</span></div>
+        <h4>Notifications can strand in <code>PROCESSING</code> forever</h4>
+        <p>The recovery sweep filters on <code>PENDING</code>, so a hard kill between claim and catch strands the row permanently — and the queue's stalled-job retry finds nothing to claim and reports success. The architecture doc's claim that a dying worker cannot strand a message holds only for handled exceptions.</p>
+        <p class="ev">grep "'PROCESSING'" server/src — single writer, sweep excludes it</p>
+      </div>
+    </article>
+
+    <article class="find c-sec">
+      <div class="num">16</div>
+      <div>
+        <div class="chips"><span class="chip chip-sec">Correctness</span><span class="chip chip-eff">Effort: small</span></div>
+        <h4>Account lockout does not escalate, and is untested</h4>
+        <p>Eight failures buy a fifteen-minute lock — then the counter resets to zero, so every fifteen minutes buys another eight attempts. The comment calls it “progressive lockout”; nothing escalates. No test at any level drives an account into lockout.</p>
+        <p class="ev">auth.service.ts:29-30, 252-256 · no lockout test anywhere</p>
+      </div>
+    </article>
+
+  </div>
+
+  <h2>Tier 3 — contract drift and user-visible defects</h2>
+  <p class="lede">Nineteen findings. The pattern is consistent: features that exist on the server and are unreachable, or exist on the client and 422.</p>
+
+  <div class="scroll">
+    <table>
+      <thead><tr><th>#</th><th>Finding</th><th>Effort</th></tr></thead>
+      <tbody>
+        <tr><td class="n">17</td><td><strong>Client/server enum drift producing live 422s.</strong> <code>AssignmentStrategy</code> offers two values the server rejects in shipped dropdowns and omits one it accepts. <code>WaitlistStatus</code> ships a “Slot held” filter that 422s. <code>ResourceType</code> omits <code>FACILITY</code>, so facility resources cannot be created.</td><td class="n">S</td></tr>
+        <tr><td class="n">18</td><td><strong><code>Customer.lastName</code> typed non-null but nullable.</strong> Renders the literal string “Jane null” in six places. The server gets this right everywhere.</td><td class="n">S</td></tr>
+        <tr><td class="n">19</td><td><strong>Every waitlist offer email ships a dead link.</strong> The template links to a claim URL for which no client route and no server endpoint exist. There is also no public way to join a waitlist.</td><td class="n">M</td></tr>
+        <tr><td class="n">20</td><td><strong>Owner dashboard spins forever for anyone without <code>analytics:read</code>.</strong> Under TanStack Query v5 a disabled query stays <code>isPending</code>, piped straight into <code>isLoading</code>. Six panels skeleton indefinitely for a Staff user.</td><td class="n">S</td></tr>
+        <tr><td class="n">21</td><td><strong><code>customers:read:assigned</code> is a dead end the UI routes into.</strong> Staff holds it, the route guard accepts it, and all six customer endpoints require the full grant. Every request 403s.</td><td class="n">S</td></tr>
+        <tr><td class="n">22</td><td><strong>The UI's permission set is a hardcoded mirror, not the server's answer.</strong> <code>/auth/me</code> never populates <code>activeWorkspace</code> because the auth router bypasses tenant resolution, so per-member GRANT/DENY overrides — which the server genuinely honours — are invisible to the client.</td><td class="n">S</td></tr>
+        <tr><td class="n">23</td><td><strong><code>BookingLink.requiresApproval</code> is inert.</strong> Settable, surfaced, badged in the owner UI — and not consulted when computing effective policy.</td><td class="n">S</td></tr>
+        <tr><td class="n">24</td><td><strong>No “book an appointment” UI.</strong> <code>POST /appointments</code> is documented, permission-gated and idempotent, and no client code calls it. Nor is there any forgot-password or verify-email flow.</td><td class="n">M</td></tr>
+        <tr><td class="n">25</td><td><strong>Resource requirements are not an input to availability search.</strong> A service whose only room is taken still shows the slot as bookable; the customer discovers it as a 409 after submitting.</td><td class="n">M–L</td></tr>
+        <tr><td class="n">26</td><td><strong>Booking caps enforced at submit but invisible in availability.</strong> The slot engine declares <code>LIMIT_REACHED</code> and never emits it.</td><td class="n">M</td></tr>
+        <tr><td class="n">27</td><td><strong>Location scoping is broken in the availability engine.</strong> A holiday at one branch closes the whole workspace; location-scoped overrides are accepted by the API and never loaded.</td><td class="n">M</td></tr>
+        <tr><td class="n">28</td><td><strong>Overnight business hours are offerable but not bookable</strong> — search resolves across the day boundary, verification does not. Read from code; no test either way.</td><td class="n">M</td></tr>
+        <tr><td class="n">29</td><td><strong>Six of sixteen notification templates have no producer</strong>, including the owner's new-booking notification the spec requires.</td><td class="n">M</td></tr>
+        <tr><td class="n">30</td><td><strong>Two of nine specified Socket.IO events are never emitted</strong> while being declared, documented and mirrored into the client.</td><td class="n">S</td></tr>
+        <tr><td class="n">31</td><td><strong>Utilisation ignores leave, holidays and blackouts.</strong> A provider on a week's leave still counts as rostered. <code>docs/Analytics.md</code> explicitly promises the opposite.</td><td class="n">M</td></tr>
+        <tr><td class="n">32</td><td>Staff dashboard has no “assigned services” view; a Staff user sees the whole catalogue with no indication which entries are theirs.</td><td class="n">S</td></tr>
+        <tr><td class="n">33</td><td>Admin dashboard has no error/security overview and no configuration surface. Security signal exists only per-account or by typing an action prefix into the audit filter.</td><td class="n">M</td></tr>
+        <tr><td class="n">34</td><td>Analytics heatmap silently drops bookings outside 06:00–22:00 while still letting them compress the colour scale.</td><td class="n">S</td></tr>
+        <tr><td class="n">35</td><td>Charts have no data-table alternative; the Recharts SVG is not <code>aria-hidden</code>, so screen readers get tick labels and no values.</td><td class="n">S</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Tier 4 — test coverage, documentation, hygiene</h2>
+
+  <div class="scroll">
+    <table>
+      <thead><tr><th>#</th><th>Finding</th><th>Effort</th></tr></thead>
+      <tbody>
+        <tr><td class="n">36</td><td><strong>The most security-load-bearing branch in auth is untested.</strong> No test at any level exercises refresh rotation or reuse detection — the “replay a rotated token, burn the family” path.</td><td class="n">M</td></tr>
+        <tr><td class="n">37</td><td><strong>The scheduling rule-resolution layer is untested.</strong> Hours × staff rules × overrides × holidays × cross-zone intersection — the most bug-prone code in the repository — is called by no test. The pure slot engine <em>is</em> well covered.</td><td class="n">L</td></tr>
+        <tr><td class="n">38</td><td><strong>Zero coverage</strong> for waitlist, resources, approve/reject, analytics endpoints, notification delivery, socket auth. No client unit tests at all.</td><td class="n">L</td></tr>
+        <tr><td class="n">39</td><td>Cross-tenant tests cover reads only; the spec demands update and delete too. One E2E assertion accepts <code>404|409|422</code>, which an unrelated conflict would satisfy.</td><td class="n">S</td></tr>
+        <tr><td class="n">40</td><td><strong>No E2E covers a non-owner role.</strong> Every fixture registers a fresh owner, so <code>:own</code>-scoped visibility has no end-to-end evidence.</td><td class="n">L</td></tr>
+        <tr><td class="n">41</td><td>Redis: the documented cache-invalidation strategy does not exist. Five of nine documented namespaces are never written.</td><td class="n">S</td></tr>
+        <tr><td class="n">42</td><td><strong>OpenAPI has no response schemas.</strong> All 63 components are request-side, so the document cannot generate or validate a client — and the hand-maintained client types are where findings 17 and 18 live.</td><td class="n">M–L</td></tr>
+        <tr><td class="n">43</td><td><strong>Nothing enforces the contract sync that currently holds.</strong> No test asserts the OpenAPI or Postman artefacts are current. Today's three-way parity is a snapshot, not an invariant.</td><td class="n">S</td></tr>
+        <tr><td class="n">44</td><td>Documentation staleness: <code>API.md</code> never mentions the admin surface; the changelog's path count is wrong; the README understates its own test counts.</td><td class="n">S</td></tr>
+        <tr><td class="n">45</td><td>Two of the spec's eight required ADRs are missing: queue architecture, and scheduling engine design.</td><td class="n">S</td></tr>
+        <tr><td class="n">46</td><td>Three data-model collapses are defensible under the spec's escape clause but written down nowhere.</td><td class="n">S</td></tr>
+        <tr><td class="n">47</td><td><code>nodemailer</code> HIGH advisory unaddressed and the deferral unrecorded. (The two criticals are dev-only and never enter the production image.)</td><td class="n">S</td></tr>
+        <tr><td class="n">48</td><td>Check-in and the in-progress sweep bypass the transition helper, writing no status history and no audit row.</td><td class="n">S</td></tr>
+        <tr><td class="n">49</td><td>Waitlist is evaluated only on cancellation — reject and reschedule-away both free a slot and neither triggers it. Its double-offer guard has no database backstop.</td><td class="n">M</td></tr>
+        <tr><td class="n">50</td><td>The idempotency hash includes the <em>resolved</em> staff id, so a genuine retry on the no-preference path can hash differently and be rejected as key reuse.</td><td class="n">S</td></tr>
+        <tr><td class="n">51</td><td>Hygiene: a dead placeholder page, two undocumented test env vars, dead <code>optionalAuthenticate</code>, a dangling queue constant, and unseeded notification templates.</td><td class="n">S</td></tr>
+        <tr><td class="n">52</td><td>One E2E spec is ~80% duplicated by another, inflating the apparent count.</td><td class="n">S</td></tr>
+        <tr><td class="n">53</td><td>The admin E2E block can self-disable: a seed change turns seven passing tests into seven silent skips while the suite still reports green.</td><td class="n">S</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>Things the auditors flagged that are actually fine</h2>
+  <p class="lede">Each auditor saw one slice. These were overruled on review.</p>
+
+  <details>
+    <summary>Twelve false alarms</summary>
+    <div class="details-body">
+      <ul>
+        <li><strong>Cross-tenant 404 instead of 403.</strong> Correct, deliberate, commented and tested at two levels. This is right.</li>
+        <li><strong>Consolidated ADR file.</strong> The spec names no file-per-record convention. A numbered, status-bearing append-only log satisfies it. Only the two <em>missing</em> decisions count.</li>
+        <li><strong>Missing <code>server/src/services/</code>.</strong> The spec permits a clear architectural reason; per-module service files preserve the separation the rule protects.</li>
+        <li><strong>Idempotency in Postgres rather than Redis.</strong> Postgres is the stronger choice. Only the doc advertising a Redis fast path is wrong.</li>
+        <li><strong>Client image runs as root.</strong> The nginx master is root and workers drop privileges — stock upstream behaviour, with <code>no-new-privileges</code> set.</li>
+        <li><strong>Off-grid booking accepted.</strong> Deliberate, commented, and covered by a test asserting the behaviour.</li>
+        <li><strong>Unjoined socket rooms.</strong> The docs explicitly say they are reserved and nobody auto-joins.</li>
+        <li><strong>npm audit's two criticals.</strong> Both <code>vitest</code>; the production image does a fresh install omitting dev dependencies.</li>
+        <li><strong><code>PlaceholderPage.tsx</code> being “deceptive”.</strong> It is dead code, but its content is an honest “not available yet” and renders no fake metric.</li>
+        <li><strong>Three absent entities.</strong> The spec's data model explicitly permits a simpler relational design.</li>
+        <li><strong>Reschedule metric counting a column rather than history rows.</strong> Same number in practice, deliberately chosen.</li>
+        <li><strong>“Test claims unverified.”</strong> One auditor had no local Postgres and said so honestly; another executed everything.</li>
+      </ul>
+    </div>
+  </details>
+
+  <h2>Deliberate omissions</h2>
+  <p class="lede">Spec items consciously not built <em>and disclosed as such</em>. Not gaps — but yours to decide on.</p>
+
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Item</th><th>How it is disclosed</th></tr></thead>
+      <tbody>
+        <tr><td>SMS delivery</td><td>Schema supports the channel; the worker closes non-email rows as <code>CANCELLED</code> <em>with a reason</em> rather than reporting them delivered. Named in the README. This is the right way to leave something unbuilt.</td></tr>
+        <tr><td>Calendar sync</td><td>ADR-0009 declines explicitly — “an empty adapter that syncs nothing is worse than an honest absence” — and no scaffolding exists, matching the stated intent.</td></tr>
+        <tr><td>Payments</td><td>Absent, disclosed.</td></tr>
+        <tr><td>Automation engine</td><td>Models and a queue name exist with no producer or processor — accurately disclosed. Contrast with webhooks (04), which is <em>not</em>.</td></tr>
+        <tr><td>Member invite &amp; role management</td><td>Stated plainly in the UI itself. Honestly disclosed — but it still breaks a mandated capability, so it stays in Tier 1.</td></tr>
+        <tr><td>OpenAPI response schemas</td><td>Disclosed deliberately in the generator's header comment. The cost is real, hence finding 42.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>What is genuinely solid</h2>
+  <p class="lede">Worth knowing what <em>not</em> to re-check.</p>
+
+  <ul class="plain">
+    <li><strong>Booking concurrency.</strong> Five layers in the spec's own order, two real GiST exclusion constraints, proven by a ten-simultaneous-request test that yields exactly one appointment and a six-way group race that never oversells. The migration comment even explains why an exclusion constraint cannot express “at most N” for shared resources.</li>
+    <li><strong>Timezones and DST.</strong> Luxon throughout, fixed offsets rejected, staff and business zones intersected as instants, no manual offset arithmetic anywhere. Both DST directions tested.</li>
+    <li><strong>Tenant read isolation.</strong> 404 not 403, permissions re-read per request and never carried in the JWT, DENY beating GRANT, every lookup scoped by tenant in the same query.</li>
+    <li><strong>Transactional outbox.</strong> Rows written inside the caller's transaction via savepoint, enqueued after commit, drained by a real worker in a separate container with backoff and a recovery sweep.</li>
+    <li><strong>Security baseline.</strong> The env layer refuses to boot on weak or placeholder secrets, seeding enabled, or non-HTTPS origins in production. Every body schema is strict, so privilege escalation via an extra field is a 422.</li>
+    <li><strong>Contracts, today.</strong> 130 routes = 130 OpenAPI operations = 130 Postman requests, zero drift on paths, request schemas, status codes or header wiring.</li>
+    <li><strong>Database.</strong> Nine migrations up <em>and down</em> clean, 42+ tables, 158 indexes; every index and constraint the spec names confirmed live in <code>pg_constraint</code>.</li>
+    <li><strong>Honesty of the source tree.</strong> Zero TODO, FIXME, HACK or XXX across every tracked file. No <code>debugger</code>, no <code>.only</code>, no empty catch, no mock data, no committed secrets. Every figure on all four dashboards traces to an API field.</li>
+  </ul>
+
+  <footer>
+    Audited against MEETFLOW_ONLY_MASTER_PROMPT.md — 2,081 lines, recovered from the session transcript rather than from memory.<br>
+    Eight parallel auditors across auth · scheduling · lifecycle · jobs · dashboards · contracts · infrastructure · documentation, then one reconciliation pass.<br>
+    Findings 01, 03, 04, 05, 06, 07, 08, 09, 10, 11 independently re-verified against the working tree before publication. Finding 14 is the auditor's citation, not re-checked.
+  </footer>
+
+</div>
+
+
+<button class="theme-btn" type="button" id="themeBtn" aria-live="polite">Theme</button>
+<script>
+  (function () {
+    var root = document.documentElement;
+    var btn = document.getElementById('themeBtn');
+    var order = ['system', 'light', 'dark'];
+    var i = 0;
+    function apply() {
+      var mode = order[i];
+      if (mode === 'system') root.removeAttribute('data-theme');
+      else root.setAttribute('data-theme', mode);
+      btn.textContent = 'Theme: ' + mode;
+    }
+    btn.addEventListener('click', function () {
+      i = (i + 1) % order.length;
+      apply();
+    });
+    apply();
+  })();
+</script>
+
+</body>
+</html>
