@@ -232,4 +232,27 @@ test.describe('appointment lifecycle', () => {
     await expect(page.getByRole('button', { name: 'Reschedule' })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toHaveCount(0);
   });
+
+  test('changing the time zone re-renders the appointment in the chosen zone', async ({ page }) => {
+    const { confirmation } = await bookAppointment(workspace, {
+      minHoursAhead: BEYOND_DEADLINE_HOURS,
+      skip: 4,
+      firstName: 'Zoned',
+    });
+
+    await page.goto(`/appointments/${confirmation.appointment.publicId}`);
+    const booked = ((await whenValue(page).textContent()) ?? '').trim();
+    expect(booked.length).toBeGreaterThan(0);
+
+    // Auckland is far enough from the booking zone that the rendered time has
+    // to move even for a booking near the middle of the day.
+    await page
+      .getByLabel('Time zone for the times shown on this page')
+      .selectOption('Pacific/Auckland');
+
+    await expect(whenValue(page)).not.toHaveText(booked);
+    // And the zone in force is named, rather than left for the reader to infer
+    // from a time that silently changed under them.
+    await expect(page.getByRole('contentinfo')).toContainText(/Auckland/i);
+  });
 });

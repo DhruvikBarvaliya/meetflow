@@ -326,16 +326,28 @@ export function isoDateAhead(daysAhead: number): string {
   return date.toISOString().slice(0, 10);
 }
 
+/**
+ * The openings a booking link is publishing.
+ *
+ * `staffProfileId` is not a convenience. The availability search assigns each
+ * opening to **one** provider — Smart Match picks who takes it — so a workspace
+ * with two people on the same hours publishes one slot at 9:00, not two, and
+ * filtering the result by provider afterwards yields nothing for whoever lost
+ * the match. Naming the provider in the request is the only way to ask "what is
+ * *this* person free for", which is what any spec about per-person visibility
+ * needs. The link must allow provider selection, which is the default.
+ */
 export async function fetchPublicSlots(
   slug: string,
   serviceId: string,
-  options: { fromDaysAhead?: number; toDaysAhead?: number } = {},
+  options: { fromDaysAhead?: number; toDaysAhead?: number; staffProfileId?: string } = {},
 ): Promise<PublicSlot[]> {
   const fromDate = isoDateAhead(options.fromDaysAhead ?? 1);
   const toDate = isoDateAhead(options.toDaysAhead ?? 10);
   const result = await apiCall<{ slots: PublicSlot[] }>(
     `/api/v1/public/booking-links/${slug}/availability` +
-      `?serviceId=${serviceId}&fromDate=${fromDate}&toDate=${toDate}&timezone=${encodeURIComponent(TEST_TIMEZONE)}`,
+      `?serviceId=${serviceId}&fromDate=${fromDate}&toDate=${toDate}&timezone=${encodeURIComponent(TEST_TIMEZONE)}` +
+      (options.staffProfileId ? `&staffProfileId=${options.staffProfileId}` : ''),
   );
   return result.slots;
 }

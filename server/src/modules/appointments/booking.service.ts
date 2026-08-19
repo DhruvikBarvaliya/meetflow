@@ -107,6 +107,24 @@ export interface CreateBookingInput {
     phone?: string | null;
   };
   bookingLinkId?: string | null;
+  /**
+   * What the caller asked for, for the callers whose `staffProfileId` and
+   * `locationId` above are a server-side *resolution* of the request rather
+   * than the request itself. Nothing but the idempotency hash reads it; the
+   * booking is always made against the resolved ids.
+   *
+   * The public "no preference" path is why it exists. There the provider and
+   * site come from a fresh Smart Match run, so two attempts under one key can
+   * legitimately resolve to different providers — and hashing the resolution
+   * would refuse the second as key reuse, which is the exact failure an
+   * idempotency key exists to prevent.
+   */
+  requested?: {
+    /** `null` when the caller expressed no provider preference. */
+    staffProfileId: string | null;
+    /** `null` when the caller named no site. */
+    locationId: string | null;
+  };
   source: 'PUBLIC' | 'STAFF' | 'OWNER' | 'ADMIN' | 'API' | 'WAITLIST';
   customerNotes?: string | null;
   internalNotes?: string | null;
@@ -523,13 +541,43 @@ export async function createBooking(input: CreateBookingInput): Promise<BookingR
     : null;
 
   // --- Idempotency claim -------------------------------------------------
+  // Hashed over what the caller *sent*, never over what the server resolved
+  // from it, because two opposite failures both live here:
+  //
+  //  - A retry must keep hashing the same. Where the caller expressed no
+  //    provider preference, the ids above were chosen by Smart Match inside the
+  //    request, and a second attempt under load can pick a different provider
+  //    or site than the first. Hashing those would refuse the retry as
+  //    IDEMPOTENCY_KEY_REUSED — the precise opposite of what the key is for —
+  //    so `input.requested` carries the caller's own (possibly empty)
+  //    preference and that is what goes in.
+  //  - A different payload must still be caught. Everything a caller can vary
+  //    and would notice being ignored belongs in the hash: the answers to the
+  //    link's questions, the notes, and the whole customer identity rather than
+  //    only the email, so that "same key, different person" cannot silently
+  //    replay somebody else's appointment back at them.
+  const requested = input.requested ?? {
+    staffProfileId: input.staffProfileId,
+    locationId: input.locationId ?? null,
+  };
   const requestHash = canonicalHash({
     businessId: input.businessId,
     serviceId: input.serviceId,
-    staffProfileId: input.staffProfileId,
-    locationId: input.locationId ?? null,
+    staffProfileId: requested.staffProfileId,
+    locationId: requested.locationId,
+    bookingLinkId: input.bookingLinkId ?? null,
     startsAt: input.startsAt.toISOString(),
-    email: input.customer.email.trim().toLowerCase(),
+    timezone: input.timezone,
+    customer: {
+      id: input.customer.id ?? null,
+      email: input.customer.email.trim().toLowerCase(),
+      firstName: input.customer.firstName.trim(),
+      lastName: input.customer.lastName?.trim() ?? null,
+      phone: input.customer.phone?.trim() ?? null,
+    },
+    customerNotes: input.customerNotes ?? null,
+    internalNotes: input.internalNotes ?? null,
+    answers: input.answers ?? {},
   });
 
   let idempotencyRecord: IdempotencyKey | null = null;

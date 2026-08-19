@@ -12,7 +12,7 @@
 import { Op } from 'sequelize';
 import { createLogger } from '../../config/logger';
 import { Appointment, IdempotencyKey, RefreshToken, WaitlistEntry } from '../../database/models';
-import { emitToWorkspace, SocketEvents } from '../../sockets';
+import { startAppointment } from '../../modules/appointments/lifecycle.service';
 
 const log = createLogger('maintenance');
 
@@ -53,6 +53,12 @@ export async function expireWaitlistHolds(): Promise<number> {
  *
  * Only appointments the customer has actually checked into are advanced —
  * check-in is evidence they are here, whereas the clock alone is not.
+ *
+ * Each promotion goes through `startAppointment` rather than a bare `update()`
+ * here. A status change made by a job is still a status change: it owes the
+ * same status-history and audit rows a member of staff pressing the button
+ * would leave, and a diary that cannot say who moved an appointment — or that a
+ * scheduler did — is a diary nobody can reconstruct afterwards.
  */
 export async function advanceInProgress(): Promise<number> {
   const now = new Date();
@@ -66,20 +72,33 @@ export async function advanceInProgress(): Promise<number> {
     limit: BATCH_LIMIT,
   });
 
+  let advanced = 0;
   for (const appointment of starting) {
-    await appointment.update({ status: 'IN_PROGRESS', startedAt: now });
-    emitToWorkspace(appointment.businessId, SocketEvents.appointmentUpdated, {
-      appointmentId: appointment.id,
-      publicId: appointment.publicId,
-      status: 'IN_PROGRESS',
-      startsAt: appointment.startsAt,
-    });
+    try {
+      await startAppointment({
+        businessId: appointment.businessId,
+        appointmentId: appointment.id,
+        actor: { type: 'SYSTEM', label: 'maintenance.advance_in_progress' },
+        reason: 'Checked in and the start time has passed.',
+      });
+      advanced += 1;
+    } catch (error) {
+      // One appointment that moved between the scan and its transaction —
+      // cancelled while the customer sat in the waiting room, completed by
+      // hand — must not stop the rest of the batch. `startAppointment` re-reads
+      // the row under a lock, so a state that no longer permits the promotion
+      // is refused there rather than overwritten here.
+      log.warn(
+        { err: error, appointmentId: appointment.id },
+        'could not advance an appointment to IN_PROGRESS',
+      );
+    }
   }
 
-  if (starting.length > 0) {
-    log.info({ count: starting.length }, 'advanced checked-in appointments to IN_PROGRESS');
+  if (advanced > 0) {
+    log.info({ count: advanced }, 'advanced checked-in appointments to IN_PROGRESS');
   }
-  return starting.length;
+  return advanced;
 }
 
 /**

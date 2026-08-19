@@ -31,6 +31,7 @@ import {
   type SystemRoleKey,
 } from '../auth/permissions';
 import type { RequestMetadata } from '../auth/auth.service';
+import { invalidateBookingPageCache } from '../publicBooking/publicBooking.cache';
 
 const log = createLogger('businesses');
 
@@ -317,6 +318,11 @@ export async function updateBusiness(
     metadata: { before, after: { name: business.name, timezone: business.timezone } },
   });
 
+  // The workspace's own name, logo, timezone and support details are printed on
+  // every published page. No transaction here — the row is already committed —
+  // so the drop happens straight away.
+  await invalidateBookingPageCache(businessId);
+
   return business;
 }
 
@@ -387,6 +393,11 @@ export async function updateSettings(
     ipAddress: metadata.ipAddress,
     metadata: { changed: Object.keys(input) },
   });
+
+  // Booking policy is quoted to the customer before they commit: the notice
+  // period, the horizon, whether a booking needs approving, and whether it can
+  // be cancelled or moved at all.
+  await invalidateBookingPageCache(businessId);
 
   return settings;
 }

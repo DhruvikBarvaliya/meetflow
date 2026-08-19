@@ -35,6 +35,7 @@ import { ConflictError, ErrorCode, NotFoundError, ValidationError } from '../../
 import { slugify, uniqueSlug } from '../../utils/ids';
 import { AuditActions, recordAudit } from '../audit/audit.service';
 import type { RequestMetadata } from '../auth/auth.service';
+import { invalidateBookingPageCache } from '../publicBooking/publicBooking.cache';
 import type {
   CreateCategoryBody,
   CreateServiceBody,
@@ -575,6 +576,11 @@ export async function createService(
       { transaction },
     );
 
+    // A new service can appear on a booking page the moment it exists — a
+    // CATALOG link offers what the workspace sells — so the pages that were
+    // assembled without it are no longer what the operator publishes.
+    await invalidateBookingPageCache(businessId, transaction);
+
     log.info({ businessId, serviceId: service.id, slug }, 'service created');
     return service;
   });
@@ -689,6 +695,11 @@ export async function updateService(
       { transaction },
     );
 
+    // The public page quotes this row's name, price, duration and capacity, so
+    // an edit that is not followed by an invalidation is an edit the customer
+    // does not see until the cache TTL runs out.
+    await invalidateBookingPageCache(businessId, transaction);
+
     return service;
   });
 }
@@ -745,6 +756,11 @@ export async function deleteService(
       },
       { transaction },
     );
+
+    // A retired service that a cached page still offers is worse than a stale
+    // price: a customer picks it, and the booking is refused by a catalogue
+    // that no longer has it.
+    await invalidateBookingPageCache(businessId, transaction);
 
     log.info({ businessId, serviceId: service.id }, 'service deleted');
   });
@@ -881,6 +897,11 @@ export async function replaceServiceStaff(
       { transaction },
     );
 
+    // `service_staff` is what a page's provider list is derived from, so a
+    // provider added to or taken off this service changes who the public page
+    // offers to book with.
+    await invalidateBookingPageCache(businessId, transaction);
+
     log.info(
       { businessId, serviceId: service.id, added: added.length, removed: removed.length },
       'service staff replaced',
@@ -963,6 +984,11 @@ export async function replaceServiceLocations(
       },
       { transaction },
     );
+
+    // Same reason as the staff pairings: `service_locations` decides which
+    // sites a page offers, including the "no rows means everywhere" case where
+    // adding the first row *narrows* the list a customer sees.
+    await invalidateBookingPageCache(businessId, transaction);
 
     log.info(
       { businessId, serviceId: service.id, added: added.length, removed: removed.length },

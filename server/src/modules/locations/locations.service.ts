@@ -23,6 +23,7 @@ import { slugify, uniqueSlug } from '../../utils/ids';
 import { isValidTimezone } from '../../utils/time';
 import { AuditActions, recordAudit } from '../audit/audit.service';
 import type { RequestMetadata } from '../auth/auth.service';
+import { invalidateBookingPageCache } from '../publicBooking/publicBooking.cache';
 import type {
   CreateLocationBody,
   ListLocationsQuery,
@@ -227,6 +228,10 @@ export async function createLocation(
       { transaction },
     );
 
+    // A site the workspace can offer is listed on the published page for every
+    // service that reaches it.
+    await invalidateBookingPageCache(businessId, transaction);
+
     log.info({ businessId, locationId: location.id, slug }, 'location created');
     return location;
   });
@@ -316,6 +321,9 @@ export async function updateLocation(
       { transaction },
     );
 
+    // The page names the site and, for a virtual one, quotes its meeting URL.
+    await invalidateBookingPageCache(businessId, transaction);
+
     return location;
   });
 }
@@ -371,6 +379,8 @@ export async function deleteLocation(
       },
       { transaction },
     );
+
+    await invalidateBookingPageCache(businessId, transaction);
 
     log.info({ businessId, locationId: location.id }, 'location deleted');
   });

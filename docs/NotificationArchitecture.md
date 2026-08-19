@@ -148,9 +148,18 @@ PENDING ──appointment cancelled / no provider──► CANCELLED
 ## Templates
 
 Built-in templates ship with the product, so notifications work the moment a
-workspace is created. A workspace may override any of them with a row in
-`notification_templates`; resolution is workspace override → system row →
-built-in default.
+workspace is created. `resolveTemplate` looks for a workspace override, then a
+system row, then falls back to the built-in default — workspace override →
+system row → built-in default.
+
+**Only the third branch runs today.** `notification_templates` is created by
+migration but never written: no seeder inserts the system rows, and no route
+lets a workspace create an override, so the table is empty in every environment
+and the built-in defaults are always what a customer receives. The `TEMPLATES_MANAGE`
+permission is defined and granted to owners but is attached to no endpoint.
+Closing this means either seeding the system rows or dropping the permission —
+a product decision, recorded here rather than quietly left as an unreachable
+code path.
 
 Rendering is deliberately **not** a general template engine. Bodies are partly
 author-controlled, and a real engine would turn "edit your confirmation email"

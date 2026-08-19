@@ -39,6 +39,7 @@ import { ConflictError, ErrorCode, NotFoundError, ValidationError } from '../../
 import { slugify, uniqueSlug } from '../../utils/ids';
 import { AuditActions, recordAudit } from '../audit/audit.service';
 import type { RequestMetadata } from '../auth/auth.service';
+import { invalidateBookingPageCache } from '../publicBooking/publicBooking.cache';
 import type {
   CreateBookingLinkBody,
   CustomQuestion,
@@ -481,6 +482,11 @@ export async function createBookingLink(
       { transaction },
     );
 
+    // Nothing has cached *this* page yet, but a deleted link releases its slug
+    // for reuse: without this, a new link at a recycled address would serve the
+    // retired link's cached page to the first customers who found it.
+    await invalidateBookingPageCache(businessId, transaction);
+
     log.info({ businessId, bookingLinkId: link.id, slug }, 'booking link created');
     return toDetail(businessId, link, transaction);
   });
@@ -597,6 +603,10 @@ export async function updateBookingLink(
       { transaction },
     );
 
+    // The link row is the page's own half of the cached payload — its name,
+    // branding, questions and approval flag are all quoted there.
+    await invalidateBookingPageCache(businessId, transaction);
+
     return toDetail(businessId, link, transaction);
   });
 }
@@ -656,6 +666,13 @@ export async function deleteBookingLink(
       },
       { transaction },
     );
+
+    // `resolveBookingLink` reads PostgreSQL, so the retired address stops
+    // resolving immediately and the cached page is already unreachable. Dropped
+    // anyway, because leaving a whole workspace's published configuration in
+    // Redis for a link somebody deliberately retired is not a state to be
+    // relaxed about.
+    await invalidateBookingPageCache(businessId, transaction);
 
     log.info({ businessId, bookingLinkId: link.id }, 'booking link deleted');
   });
@@ -743,6 +760,9 @@ export async function replaceBookingLinkServices(
       },
       { transaction },
     );
+
+    // The offered-services list and its order are both part of the cached page.
+    await invalidateBookingPageCache(businessId, transaction);
 
     log.info(
       { businessId, bookingLinkId: link.id, added: added.length, removed: removed.length },

@@ -421,11 +421,52 @@ export async function refresh(
   }
 
   return sequelize.transaction(async (transaction) => {
-    const { raw, row } = await issueRefreshToken(user.id, stored.familyId, metadata, transaction);
-    await stored.update(
-      { revokedAt: new Date(), revokedReason: 'ROTATED', replacedByTokenId: row.id },
-      { transaction },
+    /*
+     * Spend the presented token with a conditional UPDATE, before minting its
+     * replacement.
+     *
+     * The check above reads `revokedAt` and this writes it, and between the two
+     * another request holding the same token can do exactly the same thing.
+     * With a plain `update()` both won: five parallel refreshes of one token
+     * returned five live tokens in one family, nobody was logged out, and the
+     * reuse detection that is supposed to catch a stolen token never fired —
+     * so a thief racing the legitimate user got a working session and no alarm.
+     * The client's single-flight guard hid it, which is precisely why it needs
+     * closing here as well: the server cannot depend on a client behaving.
+     *
+     * `WHERE id = … AND revoked_at IS NULL` makes the spend atomic. PostgreSQL
+     * serialises the two updates on the row, and the loser's count comes back
+     * zero.
+     */
+    const [spent] = await RefreshToken.update(
+      { revokedAt: new Date(), revokedReason: 'ROTATED' },
+      { where: { id: stored.id, revokedAt: { [Op.is]: null } }, transaction },
     );
+
+    if (spent === 0) {
+      /*
+       * Someone else spent it in the moment between the read and this write.
+       *
+       * Deliberately NOT treated as reuse. Theft is a token presented after it
+       * was rotated — caught by the `revokedAt !== null` branch above, which
+       * burns the family. This is the same token arriving twice at once, which
+       * is a client refreshing from several tabs, and burning the family for
+       * that would log a legitimate user out for having two windows open.
+       * Refusing this one attempt is enough; the winner's token is live and the
+       * client will pick it up.
+       */
+      log.info(
+        { userId: stored.userId, familyId: stored.familyId },
+        'refresh lost the rotation race — refused without burning the family',
+      );
+      throw new UnauthenticatedError(
+        'That session token has already been used. Please try again.',
+        ErrorCode.TOKEN_REVOKED,
+      );
+    }
+
+    const { raw, row } = await issueRefreshToken(user.id, stored.familyId, metadata, transaction);
+    await stored.update({ replacedByTokenId: row.id }, { transaction });
 
     const access = signAccessToken({
       sub: user.id,
@@ -433,6 +474,32 @@ export async function refresh(
       email: user.email,
       role: user.platformRole,
     });
+
+    // Inside the transaction, like every other audit row that describes a
+    // change: the rotation and the record of it commit together or not at all.
+    //
+    // A successful refresh is worth recording even though nothing "happened" to
+    // the account. Reuse detection already writes a row, and on its own that
+    // leaves an investigator with the alarm and none of the history: which
+    // device had been rotating this family, from which address, and how
+    // recently. The pair is what makes a burnt family readable after the fact.
+    await recordAudit(
+      {
+        actorType: 'USER',
+        actorUserId: user.id,
+        actorLabel: user.email,
+        action: AuditActions.USER_TOKEN_REFRESHED,
+        entityType: 'refresh_token',
+        // The token that now exists, not the one being retired — the row names
+        // the session as it stands after the call.
+        entityId: row.id,
+        requestId: metadata.requestId,
+        ipAddress: metadata.ipAddress,
+        userAgent: metadata.userAgent,
+        metadata: { familyId: stored.familyId, rotatedFrom: stored.id },
+      },
+      { transaction },
+    );
 
     return buildResult(user, access, raw);
   });

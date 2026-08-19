@@ -6,14 +6,24 @@
  * re-declared, so the published contract cannot drift from what the server
  * actually accepts: change a zod schema and this document changes with it.
  *
- * What is *not* derived from zod is response payloads. MeetFlow shapes those in
- * its controllers and Sequelize models rather than in a schema, so inventing zod
- * mirrors for them would create exactly the second definition this file exists
- * to avoid. Responses are therefore documented as the two envelopes every
- * endpoint answers in — `{ data, meta }` and `{ error }` — with the payload
- * described in prose. Two exceptions are made for the probe endpoints, whose
- * bodies are object literals written inline in `health.routes.ts` and so have no
- * other definition to drift from.
+ * Response payloads cannot be derived the same way, because MeetFlow shapes
+ * them in its controllers and Sequelize models rather than in a schema. They
+ * were once left undescribed for that reason — a zod mirror of them is a second
+ * definition, which is what this file exists to avoid — and the cost of that
+ * turned out to be higher than the duplication it prevented: with no payload
+ * schemas the contract could generate no client, so the client wrote its own
+ * copy and drifted from the server twice. `docs/responses.ts` now holds those
+ * schemas, transcribed from the services that build the payloads and read as
+ * documentation rather than run as validation; its header states the rules that
+ * keep the transcription honest, including the one that matters most, which is
+ * that an unconfirmed payload is left undescribed rather than guessed at.
+ *
+ * So an operation answers in one of four ways: the success envelope closed over
+ * a named payload, 204 with no body, `text/csv` on the two export routes, and
+ * `{ error }` for every failure. Every operation that returns a JSON body names
+ * its payload — the untyped-envelope fallback in `ok()`, `page()` and
+ * `created()` is kept for a payload that cannot be confirmed from the service,
+ * and is currently used by none of them.
  *
  * Route coverage is transcribed from `routes/index.ts` and each module's
  * `*.routes.ts`; the paths below carry the same mount prefixes the router
@@ -184,6 +194,12 @@ import {
   rescheduleBookingSchema,
   updatePreferencesSchema,
 } from '../modules/customers/portal.validation';
+
+// Response payloads. Transcribed from the services that build them rather than
+// imported from a runtime schema, because there is no runtime schema to import
+// — the reasoning, and the rules that keep the transcription honest, are in
+// that file's header.
+import * as R from './responses';
 
 // `.openapi()` is added to every zod schema by this call, including the ones the
 // modules above already constructed: it patches the shared prototype, so the
@@ -495,14 +511,18 @@ const successEnvelopeSchema = registry.register(
   z
     .object({
       data: z.unknown().openapi({
-        description: 'The endpoint payload. Each operation describes what it holds.',
+        description: 'The endpoint payload. Each operation names the schema it holds.',
       }),
       meta: z.record(z.unknown()).optional().openapi({
         description: 'Present when the endpoint has something to say about the payload.',
       }),
     })
     .openapi({
-      description: 'The shape of every successful response that has a body.',
+      description:
+        'The generic shape of every successful response that has a body. Operations narrow ' +
+        '`data` to their own payload rather than referencing this, so nothing points at it — it ' +
+        'is here to state the contract one place, and it is what an operation whose payload is ' +
+        'not yet modelled would fall back to.',
       required: ['data'],
     }),
 );
@@ -514,7 +534,11 @@ const paginatedEnvelopeSchema = registry.register(
       data: z.array(z.unknown()).openapi({ description: 'One page of rows.' }),
       meta: pageMetaSchema,
     })
-    .openapi({ description: 'The success envelope as a list endpoint fills it in.' }),
+    .openapi({
+      description:
+        'The same envelope as a list endpoint fills it in, with the counters always present. ' +
+        'Referenced by nothing, and for the same reason as SuccessEnvelope.',
+    }),
 );
 
 const healthStatusSchema = registry.register(
@@ -564,6 +588,19 @@ const readinessSchema = registry.register(
 );
 
 // ---------------------------------------------------------------------------
+// Payload components
+//
+// Registered here rather than left to be discovered through the operations
+// below, and *before* the first of them: the generator caches a component the
+// first time it meets one, so the first use wins. `responses.ts` explains what
+// that costs when the first use happens to be a nullable field.
+// ---------------------------------------------------------------------------
+
+for (const definition of R.RESPONSE_SCHEMAS) {
+  registry.register(definition.name, definition.schema);
+}
+
+// ---------------------------------------------------------------------------
 // Response helpers
 // ---------------------------------------------------------------------------
 
@@ -571,16 +608,52 @@ function jsonResponse(description: string, schema: z.ZodTypeAny): ResponseConfig
   return { description, content: { 'application/json': { schema } } };
 }
 
-function ok(description: string): Record<string, ResponseConfig> {
-  return { '200': jsonResponse(description, successEnvelopeSchema) };
+/**
+ * The success envelope closed over one payload.
+ *
+ * Built inline per operation rather than registered as a component of its own:
+ * the envelope is the same two keys everywhere and it is `data` that differs,
+ * so a named `AppointmentEnvelope`, `ServiceEnvelope` and so on for every
+ * payload would double the component list to say nothing. `data` still
+ * resolves to a `$ref`, which is the part a client generator reads.
+ */
+function envelope(payload: z.ZodTypeAny): z.ZodTypeAny {
+  return z.object({
+    data: payload,
+    meta: z.record(z.unknown()).optional(),
+  });
 }
 
-function page(description: string): Record<string, ResponseConfig> {
-  return { '200': jsonResponse(description, paginatedEnvelopeSchema) };
+function pagedEnvelope(item: z.ZodTypeAny): z.ZodTypeAny {
+  return z.object({ data: z.array(item), meta: pageMetaSchema });
 }
 
-function created(description: string): Record<string, ResponseConfig> {
-  return { '201': jsonResponse(description, successEnvelopeSchema) };
+/**
+ * A 200 with a body.
+ *
+ * `payload` is what makes the operation say what it returns, and the
+ * description then explains that payload instead of enumerating its fields. It
+ * is optional on purpose: an operation whose payload could not be read off the
+ * service keeps the untyped envelope rather than acquiring a guessed schema
+ * that a generated client would then trust. See the rules in `responses.ts`.
+ */
+function ok(description: string, payload?: z.ZodTypeAny): Record<string, ResponseConfig> {
+  return {
+    '200': jsonResponse(description, payload ? envelope(payload) : successEnvelopeSchema),
+  };
+}
+
+/** A page of rows. `item` types one row; the meta counters are always the same. */
+function page(description: string, item?: z.ZodTypeAny): Record<string, ResponseConfig> {
+  return {
+    '200': jsonResponse(description, item ? pagedEnvelope(item) : paginatedEnvelopeSchema),
+  };
+}
+
+function created(description: string, payload?: z.ZodTypeAny): Record<string, ResponseConfig> {
+  return {
+    '201': jsonResponse(description, payload ? envelope(payload) : successEnvelopeSchema),
+  };
 }
 
 function deleted(description: string): Record<string, ResponseConfig> {
@@ -768,7 +841,10 @@ operation({
     'Identifies the service, API version, environment and Node runtime — useful when several ' +
     'revisions run side by side.',
   authenticated: false,
-  responses: ok('`data` carries `service`, `apiVersion`, `environment` and `node`.'),
+  responses: ok(
+    '`data` carries `service`, `apiVersion`, `environment` and `node`.',
+    R.versionInfoSchema,
+  ),
 });
 
 // ---------------------------------------------------------------------------
@@ -802,7 +878,7 @@ operation({
     'The rules a password must satisfy, so a sign-up form can enforce them before submitting ' +
     'rather than round-tripping a 422.',
   authenticated: false,
-  responses: ok('`data` carries the policy fields and the public app URL.'),
+  responses: ok('`data` carries the policy fields and the public app URL.', R.passwordPolicySchema),
   errors: [429, 500],
 });
 
@@ -819,7 +895,7 @@ operation({
     '422, never a silently ignored privilege escalation.',
   authenticated: false,
   body: registerRequest,
-  responses: created(SESSION_PAYLOAD),
+  responses: created(SESSION_PAYLOAD, R.sessionSchema),
   errors: [409, 422, 429, 500],
 });
 
@@ -835,7 +911,7 @@ operation({
     'gets a free pass.',
   authenticated: false,
   body: loginRequest,
-  responses: ok(SESSION_PAYLOAD),
+  responses: ok(SESSION_PAYLOAD, R.sessionSchema),
   errors: AUTH_ERRORS,
 });
 
@@ -851,7 +927,7 @@ operation({
     'holding a stolen token would hammer, and reuse detection is cheaper when it is not flooded.',
   authenticated: false,
   body: refreshRequest,
-  responses: ok(SESSION_PAYLOAD),
+  responses: ok(SESSION_PAYLOAD, R.sessionSchema),
   errors: AUTH_ERRORS,
 });
 
@@ -877,7 +953,10 @@ operation({
   operationId: 'auth.logoutAll',
   summary: 'Revoke every session for the current user',
   description: 'Signs the account out everywhere, on every device.',
-  responses: ok('`data.sessionsRevoked` counts the refresh tokens that were revoked.'),
+  responses: ok(
+    '`data.sessionsRevoked` counts the refresh tokens that were revoked.',
+    R.sessionsRevokedSchema,
+  ),
   errors: [401, 429, 500],
 });
 
@@ -892,9 +971,12 @@ operation({
     "selected for the request — the active workspace with the caller's effective permission " +
     'keys. This is where a client discovers which value to send as X-Business-Id.',
   responses: ok(
-    '`data` carries `user`, `memberships[]` (each with `businessId`, `businessName`, ' +
-      '`businessSlug`, `timezone`, `roleKey`) and `activeWorkspace`, which is null until a ' +
-      'workspace has been resolved for the request.',
+    '`activeWorkspace` is null until a workspace has been resolved for the request, which is ' +
+      'the normal state for somebody who belongs to several and has sent no X-Business-Id. ' +
+      '`customerProfiles` counts the workspaces holding a customer record for this person, and ' +
+      'exists so a brand-new owner and a customer — neither of whom holds a membership — can be ' +
+      'told apart by something other than an absence.',
+    R.authContextSchema,
   ),
   errors: [401, 429, 500],
 });
@@ -908,7 +990,7 @@ operation({
   description: 'Consumes the single-use token from the verification email.',
   authenticated: false,
   body: verifyEmailRequest,
-  responses: ok('`data.verified` is true.'),
+  responses: ok('`data.verified` is true.', R.emailVerifiedSchema),
   errors: AUTH_ERRORS,
 });
 
@@ -923,7 +1005,7 @@ operation({
     'cannot be used to enumerate accounts.',
   authenticated: false,
   body: requestPasswordResetRequest,
-  responses: ok('`data` carries a neutral acknowledgement.'),
+  responses: ok('`data` carries a neutral acknowledgement.', R.messageSchema),
   errors: [422, 429, 500],
 });
 
@@ -936,7 +1018,10 @@ operation({
   description: 'Consumes the single-use token and revokes existing sessions.',
   authenticated: false,
   body: resetPasswordRequest,
-  responses: ok('`data.message` confirms the change and asks the user to sign in again.'),
+  responses: ok(
+    '`data.message` confirms the change and asks the user to sign in again.',
+    R.messageSchema,
+  ),
   errors: AUTH_ERRORS,
 });
 
@@ -948,7 +1033,10 @@ operation({
   summary: 'Change the password of the signed-in user',
   description: 'Requires the current password, and revokes existing sessions on success.',
   body: changePasswordRequest,
-  responses: ok('`data.message` confirms the change and asks the user to sign in again.'),
+  responses: ok(
+    '`data.message` confirms the change and asks the user to sign in again.',
+    R.messageSchema,
+  ),
   errors: AUTH_ERRORS,
 });
 
@@ -976,6 +1064,7 @@ operation({
   body: createWorkspaceRequest,
   responses: created(
     '`data` carries `business`, the new `membership`, and `staffProfile` or null.',
+    R.createdWorkspaceSchema,
   ),
   errors: [401, 409, 422, 429, 500],
 });
@@ -988,7 +1077,7 @@ operation({
   summary: 'Check whether a workspace slug is free',
   description: 'Lets a sign-up form report a clash before submitting the whole form.',
   query: slugAvailabilitySchema,
-  responses: ok('`data` carries `slug` and `available`.'),
+  responses: ok('`data` carries `slug` and `available`.', R.slugAvailabilitySchema),
   errors: AUTHENTICATED_ERRORS,
 });
 
@@ -1000,7 +1089,7 @@ operation({
   summary: 'Read the current workspace',
   description: "The workspace resolved from the caller's membership. Requires `workspace:read`.",
   tenant: true,
-  responses: ok('`data` is the workspace record.'),
+  responses: ok('`data` is the workspace record.', R.workspaceSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -1016,7 +1105,7 @@ operation({
     'tenant id the architecture forbids.',
   tenant: true,
   body: updateWorkspaceRequest,
-  responses: ok('`data` is the updated workspace record.'),
+  responses: ok('`data` is the updated workspace record.', R.workspaceSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1030,7 +1119,7 @@ operation({
     'Slot interval, buffers, notice, horizon, cancellation and reschedule deadlines, approval ' +
     'and waitlist behaviour. Requires `workspace:read`.',
   tenant: true,
-  responses: ok('`data` is the settings record.'),
+  responses: ok('`data` is the settings record.', R.workspaceSettingsSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -1045,7 +1134,7 @@ operation({
     'value without echoing the rest back.',
   tenant: true,
   body: updateWorkspaceSettingsRequest,
-  responses: ok('`data` is the updated settings record.'),
+  responses: ok('`data` is the updated settings record.', R.workspaceSettingsSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1062,7 +1151,7 @@ operation({
     'and is unchanged — retiring it is a breaking change and belongs to a release note rather ' +
     'than to a quiet removal — but it will not gain features.',
   tenant: true,
-  responses: ok('`data` is the array of memberships.'),
+  responses: ok('`data` is the array of memberships.', z.array(R.workspaceMembershipSchema)),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -1076,7 +1165,7 @@ operation({
     'The roles available in this workspace and the permissions each carries. Requires ' +
     '`roles:read`.',
   tenant: true,
-  responses: ok('`data` is the array of roles.'),
+  responses: ok('`data` is the array of roles.', z.array(R.roleSchema)),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -1096,7 +1185,7 @@ operation({
   description: 'Requires `locations:read`.',
   tenant: true,
   query: listLocationsQuerySchema,
-  responses: page('`data` is one page of locations.'),
+  responses: page('`data` is one page of locations.', R.locationSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -1111,7 +1200,7 @@ operation({
     "inherits the workspace zone rather than the column's UTC default.",
   tenant: true,
   body: createLocationRequest,
-  responses: created('`data` is the created location.'),
+  responses: created('`data` is the created location.', R.locationSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1124,7 +1213,7 @@ operation({
   description: 'Requires `locations:read`.',
   tenant: true,
   params: locationIdParamSchema,
-  responses: ok('`data` is the location.'),
+  responses: ok('`data` is the location.', R.locationSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -1140,7 +1229,7 @@ operation({
   tenant: true,
   params: locationIdParamSchema,
   body: updateLocationRequest,
-  responses: ok('`data` is the updated location.'),
+  responses: ok('`data` is the updated location.', R.locationSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1175,7 +1264,7 @@ operation({
   description: 'Requires `teams:read`.',
   tenant: true,
   query: listTeamsQuerySchema,
-  responses: page('`data` is one page of teams.'),
+  responses: page('`data` is one page of teams.', R.teamSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -1190,7 +1279,7 @@ operation({
     'rather than silently rewritten when supplied.',
   tenant: true,
   body: createTeamRequest,
-  responses: created('`data` is the created team.'),
+  responses: created('`data` is the created team.', R.teamSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1203,7 +1292,7 @@ operation({
   description: 'Requires `teams:read`.',
   tenant: true,
   params: teamIdParamsSchema,
-  responses: ok('`data` is the team with its `members` array.'),
+  responses: ok('`data` is the team with its `members` array.', R.teamDetailSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -1217,7 +1306,7 @@ operation({
   tenant: true,
   params: teamIdParamsSchema,
   body: updateTeamRequest,
-  responses: ok('`data` is the updated team.'),
+  responses: ok('`data` is the updated team.', R.teamSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1246,7 +1335,7 @@ operation({
   tenant: true,
   params: teamIdParamsSchema,
   body: addTeamMemberRequest,
-  responses: created('`data` is the created team membership row.'),
+  responses: created('`data` is the created team membership row.', R.teamMemberSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1262,7 +1351,7 @@ operation({
   tenant: true,
   params: teamMemberParamsSchema,
   body: updateTeamMemberRequest,
-  responses: ok('`data` is the updated team membership row.'),
+  responses: ok('`data` is the updated team membership row.', R.teamMemberSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1299,7 +1388,7 @@ operation({
   description: 'Requires `staff:read`.',
   tenant: true,
   query: listStaffQuerySchema,
-  responses: page('`data` is one page of staff profiles.'),
+  responses: page('`data` is one page of staff profiles.', R.staffProfileSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -1315,7 +1404,7 @@ operation({
     'neither `businessId` nor `userId` is accepted.',
   tenant: true,
   body: createStaffRequest,
-  responses: created('`data` is the created staff profile.'),
+  responses: created('`data` is the created staff profile.', R.staffProfileSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1328,7 +1417,7 @@ operation({
   description: 'Requires `staff:read`.',
   tenant: true,
   params: staffIdParamsSchema,
-  responses: ok('`data` is the staff profile.'),
+  responses: ok('`data` is the staff profile.', R.staffProfileSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -1344,7 +1433,7 @@ operation({
   tenant: true,
   params: staffIdParamsSchema,
   body: updateStaffRequest,
-  responses: ok('`data` is the updated staff profile.'),
+  responses: ok('`data` is the updated staff profile.', R.staffProfileSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1370,7 +1459,10 @@ operation({
   description: 'Requires `staff:read`.',
   tenant: true,
   params: staffIdParamsSchema,
-  responses: ok('`data` is the array of service assignments.'),
+  responses: ok(
+    '`data` is the array of service assignments.',
+    z.array(R.staffServiceAssignmentSchema),
+  ),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -1386,7 +1478,10 @@ operation({
   tenant: true,
   params: staffIdParamsSchema,
   body: replaceStaffServicesRequest,
-  responses: ok('`data` is the resulting array of service assignments.'),
+  responses: ok(
+    '`data` is the resulting array of service assignments.',
+    z.array(R.staffServiceAssignmentSchema),
+  ),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1426,6 +1521,7 @@ operation({
   responses: page(
     '`data` is one page of members, each with its `user`, `role`, `staffProfile` or null, and ' +
       'an `isOwner` flag marking the account in `businesses.owner_user_id`.',
+    R.memberSchema,
   ),
   errors: MANAGEMENT_ERRORS,
 });
@@ -1447,7 +1543,7 @@ operation({
     'rather than duplicated.',
   tenant: true,
   body: inviteMemberRequest,
-  responses: created('`data` is the created membership in the INVITED state.'),
+  responses: created('`data` is the created membership in the INVITED state.', R.memberSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1469,7 +1565,7 @@ operation({
   tenant: true,
   params: memberIdParamsSchema,
   body: updateMemberRequest,
-  responses: ok('`data` is the updated member.'),
+  responses: ok('`data` is the updated member.', R.memberSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1508,6 +1604,7 @@ operation({
   responses: ok(
     '`data` carries `role`, `rolePermissions`, `overrides` and `effectivePermissions` — role ' +
       'grants plus GRANTs minus DENYs.',
+    R.memberPermissionsSchema,
   ),
   errors: MANAGEMENT_ERRORS,
 });
@@ -1527,7 +1624,10 @@ operation({
   tenant: true,
   params: memberIdParamsSchema,
   body: replaceMemberPermissionsRequest,
-  responses: ok('`data` is the recomputed permission view, in the shape GET returns.'),
+  responses: ok(
+    '`data` is the recomputed permission view, in the shape GET returns.',
+    R.memberPermissionsSchema,
+  ),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1548,6 +1648,7 @@ operation({
   responses: ok(
     '`data` is the array of pending invitations, each with the workspace name and slug, the ' +
       'role offered, and a token to present to `POST /api/v1/members/accept`.',
+    z.array(R.invitationSchema),
   ),
   errors: AUTHENTICATED_ERRORS,
 });
@@ -1569,7 +1670,10 @@ operation({
   authenticated: true,
   tenant: false,
   body: acceptInvitationRequest,
-  responses: ok('`data` is the now-ACTIVE membership with its workspace and role.'),
+  responses: ok(
+    '`data` is the now-ACTIVE membership with its workspace and role.',
+    R.acceptedInvitationSchema,
+  ),
   errors: [401, 404, 422, 429, 500],
 });
 
@@ -1605,7 +1709,7 @@ operation({
   description: 'Requires `services:read`.',
   tenant: true,
   query: listCategoriesQuerySchema,
-  responses: page('`data` is one page of categories.'),
+  responses: page('`data` is one page of categories.', R.serviceCategorySchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -1618,7 +1722,7 @@ operation({
   description: 'Requires `services:manage`.',
   tenant: true,
   body: createServiceCategoryRequest,
-  responses: created('`data` is the created category.'),
+  responses: created('`data` is the created category.', R.serviceCategorySchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1632,7 +1736,7 @@ operation({
   tenant: true,
   params: categoryIdParamsSchema,
   body: updateServiceCategoryRequest,
-  responses: ok('`data` is the updated category.'),
+  responses: ok('`data` is the updated category.', R.serviceCategorySchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1658,7 +1762,7 @@ operation({
   description: 'Requires `services:read`.',
   tenant: true,
   query: listServicesQuerySchema,
-  responses: page('`data` is one page of services.'),
+  responses: page('`data` is one page of services.', R.serviceSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -1676,7 +1780,7 @@ operation({
     'none" when 0.',
   tenant: true,
   body: createServiceRequest,
-  responses: created('`data` is the created service.'),
+  responses: created('`data` is the created service.', R.serviceSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1689,7 +1793,7 @@ operation({
   description: 'Requires `services:read`.',
   tenant: true,
   params: serviceIdParamsSchema,
-  responses: ok('`data` is the service.'),
+  responses: ok('`data` is the service.', R.serviceDetailSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -1703,7 +1807,7 @@ operation({
   tenant: true,
   params: serviceIdParamsSchema,
   body: updateServiceRequest,
-  responses: ok('`data` is the updated service.'),
+  responses: ok('`data` is the updated service.', R.serviceSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1733,7 +1837,10 @@ operation({
   tenant: true,
   params: serviceIdParamsSchema,
   body: replaceServiceStaffRequest,
-  responses: ok('`data` is the resulting array of assignments.'),
+  responses: ok(
+    '`data` is the resulting array of assignments.',
+    z.array(R.serviceStaffAssignmentSchema),
+  ),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1749,7 +1856,10 @@ operation({
   tenant: true,
   params: serviceIdParamsSchema,
   body: replaceServiceLocationsRequest,
-  responses: ok('`data` is the resulting array of assignments.'),
+  responses: ok(
+    '`data` is the resulting array of assignments.',
+    z.array(R.serviceLocationAssignmentSchema),
+  ),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1773,7 +1883,7 @@ operation({
   description: 'Requires `resources:read`.',
   tenant: true,
   query: listResourcesQuerySchema,
-  responses: page('`data` is one page of resources.'),
+  responses: page('`data` is one page of resources.', R.resourceSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -1788,7 +1898,7 @@ operation({
     'with the appointment; `capacity` is how many appointments may hold it at the same instant.',
   tenant: true,
   body: createResourceRequest,
-  responses: created('`data` is the created resource.'),
+  responses: created('`data` is the created resource.', R.resourceSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1801,7 +1911,7 @@ operation({
   description: 'Requires `resources:read`.',
   tenant: true,
   params: resourceIdParamsSchema,
-  responses: ok('`data` is the resource.'),
+  responses: ok('`data` is the resource.', R.resourceSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -1815,7 +1925,7 @@ operation({
   tenant: true,
   params: resourceIdParamsSchema,
   body: updateResourceRequest,
-  responses: ok('`data` is the updated resource.'),
+  responses: ok('`data` is the updated resource.', R.resourceSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1844,7 +1954,10 @@ operation({
     'can still say which room a service needs.',
   tenant: true,
   params: resourceServiceIdParamsSchema,
-  responses: ok('`data` is the array of requirement rows.'),
+  responses: ok(
+    '`data` is the array of requirement rows.',
+    z.array(R.serviceResourceRequirementSchema),
+  ),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -1862,7 +1975,10 @@ operation({
   tenant: true,
   params: resourceServiceIdParamsSchema,
   body: replaceServiceRequirementsRequest,
-  responses: ok('`data` is the resulting array of requirement rows.'),
+  responses: ok(
+    '`data` is the resulting array of requirement rows.',
+    z.array(R.serviceResourceRequirementSchema),
+  ),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1882,7 +1998,7 @@ operation({
   description: 'Requires `customers:read`. `search` matches first name, last name and email.',
   tenant: true,
   query: listCustomersQuerySchema,
-  responses: page('`data` is one page of customers.'),
+  responses: page('`data` is one page of customers.', R.customerSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -1898,7 +2014,7 @@ operation({
     'request rather than the router. Booking counters are read-only and rejected if sent.',
   tenant: true,
   body: createCustomerRequest,
-  responses: created('`data` is the created customer.'),
+  responses: created('`data` is the created customer.', R.customerSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1911,7 +2027,7 @@ operation({
   description: 'Requires `customers:read`.',
   tenant: true,
   params: customerIdParamSchema,
-  responses: ok('`data` is the customer.'),
+  responses: ok('`data` is the customer.', R.customerDetailSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -1925,7 +2041,10 @@ operation({
   tenant: true,
   params: customerIdParamSchema,
   query: listCustomerAppointmentsQuerySchema,
-  responses: page("`data` is one page of the customer's appointments."),
+  responses: page(
+    "`data` is one page of the customer's appointments.",
+    R.customerAppointmentSchema,
+  ),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -1942,7 +2061,7 @@ operation({
   tenant: true,
   params: customerIdParamSchema,
   body: updateCustomerRequest,
-  responses: ok('`data` is the updated customer.'),
+  responses: ok('`data` is the updated customer.', R.customerSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -1992,7 +2111,7 @@ operation({
     'one PUT.',
   tenant: true,
   query: listBusinessHoursQuerySchema,
-  responses: page('`data` is one page of opening-hours windows.'),
+  responses: page('`data` is one page of opening-hours windows.', R.businessHoursSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -2009,7 +2128,7 @@ operation({
     WALL_CLOCK_NOTE,
   tenant: true,
   body: replaceBusinessHoursRequest,
-  responses: ok('`data` is the resulting array of windows.'),
+  responses: ok('`data` is the resulting array of windows.', z.array(R.businessHoursSchema)),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -2023,7 +2142,7 @@ operation({
   tenant: true,
   params: staffProfileIdParamsSchema,
   query: listStaffRulesQuerySchema,
-  responses: page('`data` is one page of availability rules.'),
+  responses: page('`data` is one page of availability rules.', R.staffAvailabilityRuleSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -2042,7 +2161,7 @@ operation({
   tenant: true,
   params: staffProfileIdParamsSchema,
   body: replaceStaffRulesRequest,
-  responses: ok('`data` is the resulting array of rules.'),
+  responses: ok('`data` is the resulting array of rules.', z.array(R.staffAvailabilityRuleSchema)),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -2055,7 +2174,7 @@ operation({
   description: 'Requires `availability:read`.',
   tenant: true,
   query: listOverridesQuerySchema,
-  responses: page('`data` is one page of overrides.'),
+  responses: page('`data` is one page of overrides.', R.availabilityOverrideSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -2073,7 +2192,7 @@ operation({
     'partial day, or neither for a whole one.',
   tenant: true,
   body: createOverrideRequest,
-  responses: created('`data` is the created override.'),
+  responses: created('`data` is the created override.', R.availabilityOverrideSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -2099,7 +2218,7 @@ operation({
   description: 'Requires `availability:read`.',
   tenant: true,
   query: listHolidaysQuerySchema,
-  responses: page('`data` is one page of holidays.'),
+  responses: page('`data` is one page of holidays.', R.holidaySchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -2115,7 +2234,7 @@ operation({
     'false` labels the day for customers without removing any availability.',
   tenant: true,
   body: createHolidayRequest,
-  responses: created('`data` is the created holiday.'),
+  responses: created('`data` is the created holiday.', R.holidaySchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -2141,7 +2260,7 @@ operation({
   description: 'Requires `availability:read`.',
   tenant: true,
   query: listBlackoutsQuerySchema,
-  responses: page('`data` is one page of blackout periods.'),
+  responses: page('`data` is one page of blackout periods.', R.blackoutPeriodSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -2157,7 +2276,7 @@ operation({
     'as overrides applies.',
   tenant: true,
   body: createBlackoutRequest,
-  responses: created('`data` is the created blackout period.'),
+  responses: created('`data` is the created blackout period.', R.blackoutPeriodSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -2194,7 +2313,7 @@ operation({
   description: 'Requires `booking-links:read`.',
   tenant: true,
   query: listBookingLinksQuerySchema,
-  responses: page('`data` is one page of booking links.'),
+  responses: page('`data` is one page of booking links.', R.bookingLinkSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -2212,7 +2331,7 @@ operation({
     '*is* the public URL, so a supplied one is validated rather than rewritten.',
   tenant: true,
   body: createBookingLinkRequest,
-  responses: created('`data` is the created booking link.'),
+  responses: created('`data` is the created booking link.', R.bookingLinkDetailSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -2225,7 +2344,7 @@ operation({
   description: 'Requires `booking-links:read`.',
   tenant: true,
   params: bookingLinkIdParamsSchema,
-  responses: ok('`data` is the booking link.'),
+  responses: ok('`data` is the booking link.', R.bookingLinkDetailSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -2242,7 +2361,7 @@ operation({
   tenant: true,
   params: bookingLinkIdParamsSchema,
   body: updateBookingLinkRequest,
-  responses: ok('`data` is the updated booking link.'),
+  responses: ok('`data` is the updated booking link.', R.bookingLinkDetailSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -2271,7 +2390,7 @@ operation({
   tenant: true,
   params: bookingLinkIdParamsSchema,
   body: replaceBookingLinkServicesRequest,
-  responses: ok('`data` is the updated booking link.'),
+  responses: ok('`data` is the updated booking link.', R.bookingLinkDetailSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -2304,7 +2423,7 @@ operation({
     'before the window and is still running belongs in it.',
   tenant: true,
   query: listAppointmentsQuerySchema,
-  responses: page('`data` is one page of appointments.'),
+  responses: page('`data` is one page of appointments.', R.appointmentListItemSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -2321,7 +2440,10 @@ operation({
     'history. The window may span at most 92 days.',
   tenant: true,
   query: calendarQuerySchema,
-  responses: ok('`data` is the array of calendar events; `meta` echoes the window.'),
+  responses: ok(
+    '`data` is the array of calendar events; `meta` echoes the window.',
+    z.array(R.calendarEventSchema),
+  ),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -2339,7 +2461,10 @@ operation({
     '/api/v1/appointments then requires.',
   tenant: true,
   query: availabilitySlotsQuerySchema,
-  responses: ok('`data` carries the offered slots, each with the provider that would take it.'),
+  responses: ok(
+    '`data` carries the offered slots, each with the provider that would take it.',
+    R.availabilitySearchSchema,
+  ),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -2361,6 +2486,7 @@ operation({
   responses: created(
     '`data` carries `appointment`, `participant` and `customer`. `meta.replayed` is true when ' +
       'an idempotency key matched an earlier request, meaning this call created nothing.',
+    R.bookingResultSchema,
   ),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
@@ -2374,7 +2500,7 @@ operation({
   description: 'Requires `appointments:read` or `appointments:read:own`.',
   tenant: true,
   params: appointmentIdParamSchema,
-  responses: ok('`data` is the appointment with its related records.'),
+  responses: ok('`data` is the appointment with its related records.', R.appointmentDetailSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -2394,7 +2520,7 @@ operation({
   tenant: true,
   params: appointmentIdParamSchema,
   body: updateAppointmentRequest,
-  responses: ok('`data` is the updated appointment.'),
+  responses: ok('`data` is the updated appointment.', R.appointmentSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -2411,7 +2537,7 @@ operation({
   tenant: true,
   params: appointmentIdParamSchema,
   body: rescheduleAppointmentRequest,
-  responses: ok('`data` is the moved appointment.'),
+  responses: ok('`data` is the moved appointment.', R.appointmentSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -2427,7 +2553,7 @@ operation({
   tenant: true,
   params: appointmentIdParamSchema,
   body: appointmentReasonRequest,
-  responses: ok('`data` is the cancelled appointment.'),
+  responses: ok('`data` is the cancelled appointment.', R.appointmentSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -2443,7 +2569,7 @@ operation({
   tenant: true,
   params: appointmentIdParamSchema,
   body: emptyTransitionRequest,
-  responses: ok('`data` is the approved appointment.'),
+  responses: ok('`data` is the approved appointment.', R.appointmentSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -2459,7 +2585,7 @@ operation({
   tenant: true,
   params: appointmentIdParamSchema,
   body: appointmentReasonRequest,
-  responses: ok('`data` is the rejected appointment.'),
+  responses: ok('`data` is the rejected appointment.', R.appointmentSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -2475,7 +2601,7 @@ operation({
   tenant: true,
   params: appointmentIdParamSchema,
   body: emptyTransitionRequest,
-  responses: ok('`data` is the checked-in appointment.'),
+  responses: ok('`data` is the checked-in appointment.', R.appointmentSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -2489,7 +2615,7 @@ operation({
   tenant: true,
   params: appointmentIdParamSchema,
   body: emptyTransitionRequest,
-  responses: ok('`data` is the completed appointment.'),
+  responses: ok('`data` is the completed appointment.', R.appointmentSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -2503,7 +2629,7 @@ operation({
   tenant: true,
   params: appointmentIdParamSchema,
   body: emptyTransitionRequest,
-  responses: ok('`data` is the appointment, now marked as a no-show.'),
+  responses: ok('`data` is the appointment, now marked as a no-show.', R.appointmentSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -2537,7 +2663,7 @@ operation({
   description: 'Requires `waitlist:read`.',
   tenant: true,
   query: listWaitlistQuerySchema,
-  responses: page('`data` is one page of waitlist entries.'),
+  responses: page('`data` is one page of waitlist entries.', R.waitlistEntrySchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -2554,7 +2680,7 @@ operation({
     'so sending any of them is a 422 rather than a way to hand yourself a hold.',
   tenant: true,
   body: createWaitlistEntryRequest,
-  responses: created('`data` is the created waitlist entry.'),
+  responses: created('`data` is the created waitlist entry.', R.waitlistEntrySchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -2567,7 +2693,7 @@ operation({
   description: 'Requires `waitlist:read`.',
   tenant: true,
   params: waitlistIdParamSchema,
-  responses: ok('`data` is the waitlist entry.'),
+  responses: ok('`data` is the waitlist entry.', R.waitlistEntrySchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -2584,7 +2710,7 @@ operation({
   tenant: true,
   params: waitlistIdParamSchema,
   body: updateWaitlistEntryRequest,
-  responses: ok('`data` is the updated waitlist entry.'),
+  responses: ok('`data` is the updated waitlist entry.', R.waitlistEntrySchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -2611,7 +2737,7 @@ operation({
   tenant: true,
   params: waitlistIdParamSchema,
   body: notifyWaitlistEntryRequest,
-  responses: ok('`data` is the entry with its updated notification state.'),
+  responses: ok('`data` is the entry with its updated notification state.', R.waitlistEntrySchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -2630,7 +2756,10 @@ operation({
   tenant: true,
   params: waitlistIdParamSchema,
   body: convertWaitlistEntryRequest,
-  responses: created('`data` carries the updated `entry` and the new `appointment`.'),
+  responses: created(
+    '`data` carries the updated `entry` and the new `appointment`.',
+    R.waitlistConversionSchema,
+  ),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -2666,6 +2795,7 @@ operation({
   responses: page(
     '`data` is one page of endpoints, in the shape described on `GET /api/v1/webhooks/{id}` ' +
       'and without the signing secret.',
+    R.webhookEndpointSchema,
   ),
   errors: MANAGEMENT_ERRORS,
 });
@@ -2689,6 +2819,7 @@ operation({
   responses: created(
     '`data` is the endpoint plus `signingSecret`, and `meta.secretRetrievable` is false to say ' +
       'so in the payload rather than only in this document.',
+    R.createdWebhookEndpointSchema,
   ),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
@@ -2702,7 +2833,10 @@ operation({
   description: 'Requires `webhooks:read`. Includes the most recent deliveries for triage.',
   tenant: true,
   params: webhookIdParamsSchema,
-  responses: ok(`${WEBHOOK_ENDPOINT_PAYLOAD} \`recentDeliveries\` carries the latest attempts.`),
+  responses: ok(
+    `${WEBHOOK_ENDPOINT_PAYLOAD} \`recentDeliveries\` carries the latest attempts.`,
+    R.webhookEndpointDetailSchema,
+  ),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -2721,7 +2855,7 @@ operation({
   tenant: true,
   params: webhookIdParamsSchema,
   body: updateWebhookRequest,
-  responses: ok(WEBHOOK_ENDPOINT_PAYLOAD),
+  responses: ok(WEBHOOK_ENDPOINT_PAYLOAD, R.webhookEndpointSchema),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -2759,7 +2893,10 @@ operation({
     'be the least useful possible answer to "is this endpoint working?".',
   tenant: true,
   params: webhookIdParamsSchema,
-  responses: created('`data` is the queued delivery row, initially PENDING.'),
+  responses: created(
+    '`data` is the queued delivery row, initially PENDING.',
+    R.webhookDeliverySchema,
+  ),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -2777,7 +2914,10 @@ operation({
   tenant: true,
   params: webhookIdParamsSchema,
   query: listDeliveriesQuerySchema,
-  responses: page('`data` is one page of delivery attempts, newest first, with their payloads.'),
+  responses: page(
+    '`data` is one page of delivery attempts, newest first, with their payloads.',
+    R.webhookDeliverySchema,
+  ),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -2798,48 +2938,57 @@ const ANALYTICS_ROUTES: Array<{
   operationId: string;
   summary: string;
   payload: string;
+  /** Four of the seven answer with a series, three with a single object. */
+  schema: z.ZodTypeAny;
 }> = [
   {
     path: 'overview',
     operationId: 'analytics.overview',
     summary: 'Headline figures for a period',
     payload: 'the headline counters for the window',
+    schema: R.analyticsOverviewSchema,
   },
   {
     path: 'trends',
     operationId: 'analytics.trends',
     summary: 'Booking volume over time',
     payload: 'the per-interval series for the window',
+    schema: z.array(R.analyticsTrendBucketSchema),
   },
   {
     path: 'staff',
     operationId: 'analytics.staff',
     summary: 'Breakdown by staff member',
     payload: 'one row per staff member',
+    schema: z.array(R.staffPerformanceSchema),
   },
   {
     path: 'services',
     operationId: 'analytics.services',
     summary: 'Breakdown by service',
     payload: 'one row per service',
+    schema: z.array(R.servicePerformanceSchema),
   },
   {
     path: 'locations',
     operationId: 'analytics.locations',
     summary: 'Breakdown by location',
     payload: 'one row per location',
+    schema: z.array(R.locationPerformanceSchema),
   },
   {
     path: 'peak-times',
     operationId: 'analytics.peakTimes',
     summary: 'Demand by day and hour',
     payload: 'demand bucketed by weekday and hour',
+    schema: z.array(R.peakTimeBucketSchema),
   },
   {
     path: 'customers',
     operationId: 'analytics.customers',
     summary: 'Customer acquisition and retention',
     payload: 'the customer counters for the window',
+    schema: R.customerAnalyticsSchema,
   },
 ];
 
@@ -2853,7 +3002,10 @@ for (const route of ANALYTICS_ROUTES) {
     description: ANALYTICS_WINDOW_NOTE,
     tenant: true,
     query: analyticsRangeQuerySchema,
-    responses: ok(`\`data\` carries ${route.payload}; \`meta\` echoes the resolved window.`),
+    responses: ok(
+      `\`data\` carries ${route.payload}; \`meta\` echoes the resolved window.`,
+      route.schema,
+    ),
     errors: MANAGEMENT_ERRORS,
   });
 }
@@ -2875,7 +3027,7 @@ operation({
     'filter cannot be used to force an unindexed scan.',
   tenant: true,
   query: appointmentReportQuerySchema,
-  responses: page('`data` is one page of report rows.'),
+  responses: page('`data` is one page of report rows.', R.appointmentReportRowSchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -2945,6 +3097,7 @@ operation({
   query: listAuditEntriesQuerySchema,
   responses: page(
     `\`data\` is one page of entries, each carrying ${AUDIT_ENTRY_FIELDS}. ${AUDIT_ENTRY_NOTE}`,
+    R.auditEntrySchema,
   ),
   errors: MANAGEMENT_ERRORS,
 });
@@ -2996,6 +3149,7 @@ operation({
   params: auditEntryIdParamsSchema,
   responses: ok(
     `\`data\` is the entry, carrying ${AUDIT_ENTRY_FIELDS} plus \`userAgent\`. ` + AUDIT_ENTRY_NOTE,
+    R.auditEntryDetailSchema,
   ),
   errors: MANAGEMENT_ERRORS,
 });
@@ -3035,6 +3189,7 @@ operation({
     '`data` carries the workspace, user, appointment and customer counters, a `bookingsByDay` ' +
       'series of exactly 14 UTC days ending today and zero-filled, and the five workspaces ' +
       'with the most bookings taken in the last 30 days.',
+    R.adminOverviewSchema,
   ),
   errors: MANAGEMENT_ERRORS,
 });
@@ -3057,6 +3212,7 @@ operation({
   responses: page(
     '`data` is one page of workspace summaries, each with its member, staff, service, ' +
       'location, appointment and customer counts.',
+    R.adminWorkspaceSummarySchema,
   ),
   errors: MANAGEMENT_ERRORS,
 });
@@ -3080,6 +3236,7 @@ operation({
   responses: ok(
     '`data` is the workspace summary plus `members`, `appointmentsByStatus` and ' +
       '`recentActivity`.',
+    R.adminWorkspaceDetailSchema,
   ),
   errors: MANAGEMENT_ERRORS,
 });
@@ -3102,7 +3259,10 @@ operation({
   tenant: false,
   params: workspaceIdParamsSchema,
   body: updateWorkspaceStatusRequest,
-  responses: ok('`data` is the workspace detail, re-read after the change committed.'),
+  responses: ok(
+    '`data` is the workspace detail, re-read after the change committed.',
+    R.adminWorkspaceDetailSchema,
+  ),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -3121,7 +3281,10 @@ operation({
   authenticated: true,
   tenant: false,
   query: listUsersQuerySchema,
-  responses: page('`data` is one page of account summaries with their workspace counts.'),
+  responses: page(
+    '`data` is one page of account summaries with their workspace counts.',
+    R.adminUserSummarySchema,
+  ),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -3140,7 +3303,10 @@ operation({
   authenticated: true,
   tenant: false,
   params: userIdParamsSchema,
-  responses: ok('`data` is the account summary plus its session state and `memberships`.'),
+  responses: ok(
+    '`data` is the account summary plus its session state and `memberships`.',
+    R.adminUserDetailSchema,
+  ),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -3163,7 +3329,10 @@ operation({
   tenant: false,
   params: userIdParamsSchema,
   body: updateUserStatusRequest,
-  responses: ok('`data` is the account detail, re-read after the change committed.'),
+  responses: ok(
+    '`data` is the account detail, re-read after the change committed.',
+    R.adminUserDetailSchema,
+  ),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -3183,7 +3352,10 @@ operation({
   tenant: false,
   params: userIdParamsSchema,
   body: updatePlatformRoleRequest,
-  responses: ok('`data` is the account detail, re-read after the change committed.'),
+  responses: ok(
+    '`data` is the account detail, re-read after the change committed.',
+    R.adminUserDetailSchema,
+  ),
   errors: MANAGEMENT_WRITE_ERRORS,
 });
 
@@ -3203,7 +3375,7 @@ operation({
   authenticated: true,
   tenant: false,
   query: listAuditLogsQuerySchema,
-  responses: page('`data` is one page of audit entries, newest first.'),
+  responses: page('`data` is one page of audit entries, newest first.', R.adminAuditEntrySchema),
   errors: MANAGEMENT_ERRORS,
 });
 
@@ -3225,6 +3397,7 @@ operation({
   responses: ok(
     '`data` carries the database and Redis checks, the outbox backlog including `dueNow` and ' +
       'the age of the oldest pending message, and the API build metadata.',
+    R.adminHealthSchema,
   ),
   errors: MANAGEMENT_ERRORS,
 });
@@ -3267,10 +3440,10 @@ operation({
   authenticated: true,
   tenant: false,
   responses: ok(
-    '`data` carries `user`, `upcomingBookings` across every workspace, and `workspaces` — one ' +
-      'entry per business that holds a record of this person, with its name, logo, timezone ' +
-      'and support contacts. Workspaces are identified by the `cus_` handle of the record, ' +
-      'never by an internal id.',
+    '`upcomingBookings` is a count across every workspace, not a list — the bookings themselves ' +
+      'are at `GET /api/v1/me/bookings`. Each workspace is identified by the `cus_` handle of ' +
+      "this person's record in it, never by an internal id.",
+    R.portalProfileSchema,
   ),
   errors: PORTAL_ERRORS,
 });
@@ -3293,6 +3466,7 @@ operation({
   responses: page(
     '`data` is one page of bookings, each with its business, service, staff and location ' +
       'summaries and the times in the workspace timezone.',
+    R.portalBookingSummarySchema,
   ),
   errors: PORTAL_ERRORS,
 });
@@ -3311,7 +3485,10 @@ operation({
   authenticated: true,
   tenant: false,
   params: bookingPublicIdParamsSchema,
-  responses: ok('`data` is the booking as the customer-facing projection describes it.'),
+  responses: ok(
+    '`data` is the booking as the customer-facing projection describes it.',
+    R.publicAppointmentSchema,
+  ),
   errors: PORTAL_ERRORS,
 });
 
@@ -3333,7 +3510,7 @@ operation({
   tenant: false,
   params: bookingPublicIdParamsSchema,
   body: cancelBookingRequest,
-  responses: ok('`data` is the cancelled booking.'),
+  responses: ok('`data` is the cancelled booking.', R.publicAppointmentSchema),
   errors: PORTAL_WRITE_ERRORS,
 });
 
@@ -3353,7 +3530,7 @@ operation({
   tenant: false,
   params: bookingPublicIdParamsSchema,
   body: rescheduleBookingRequest,
-  responses: ok('`data` is the booking at its new time.'),
+  responses: ok('`data` is the booking at its new time.', R.publicAppointmentSchema),
   errors: PORTAL_WRITE_ERRORS,
 });
 
@@ -3375,6 +3552,7 @@ operation({
   responses: ok(
     '`data` carries `preferences` (`emailEnabled`, `smsEnabled`, `marketingOptIn`, ' +
       '`reminderOffsetsMinutes`), `divergent` and `workspaceCount`.',
+    R.portalPreferencesSchema,
   ),
   errors: PORTAL_ERRORS,
 });
@@ -3395,7 +3573,10 @@ operation({
   authenticated: true,
   tenant: false,
   body: updatePreferencesRequest,
-  responses: ok('`data` is the preference view, in the shape GET returns.'),
+  responses: ok(
+    '`data` is the preference view, in the shape GET returns.',
+    R.portalPreferencesSchema,
+  ),
   errors: PORTAL_WRITE_ERRORS,
 });
 
@@ -3428,7 +3609,10 @@ operation({
     'and the offering it actually exposes.',
   authenticated: false,
   params: bookingLinkSlugParamsSchema,
-  responses: ok('`data` is the public configuration of the booking link.'),
+  responses: ok(
+    '`data` is the public configuration of the booking link.',
+    R.publicBookingConfigSchema,
+  ),
   errors: PUBLIC_ERRORS,
 });
 
@@ -3446,7 +3630,7 @@ operation({
   authenticated: false,
   params: bookingLinkSlugParamsSchema,
   query: publicAvailabilityQuerySchema,
-  responses: ok('`data` carries the offered slots.'),
+  responses: ok('`data` carries the offered slots.', R.publicAvailabilitySchema),
   errors: PUBLIC_ERRORS,
 });
 
@@ -3468,12 +3652,18 @@ operation({
   params: bookingLinkSlugParamsSchema,
   body: createPublicBookingRequest,
   responses: {
+    // Both statuses carry the same payload, and `data.replayed` says which of
+    // the two happened — so a client that ignores the status code still cannot
+    // mistake a replay for a second booking.
     '200': jsonResponse(
       'A replay: the idempotency key matched an earlier request, so this call created nothing ' +
         'and `data` is the original confirmation.',
-      successEnvelopeSchema,
+      envelope(R.publicBookingConfirmationSchema),
     ),
-    '201': jsonResponse('`data` is the booking confirmation.', successEnvelopeSchema),
+    '201': jsonResponse(
+      '`data` is the booking confirmation.',
+      envelope(R.publicBookingConfirmationSchema),
+    ),
   },
   errors: PUBLIC_WRITE_ERRORS,
 });
@@ -3490,7 +3680,10 @@ operation({
     'appointment named in the path.',
   authenticated: false,
   params: appointmentPublicIdParamsSchema,
-  responses: ok('`data` is the customer-facing view of the appointment.'),
+  responses: ok(
+    '`data` is the customer-facing view of the appointment.',
+    R.publicAppointmentSchema,
+  ),
   errors: PUBLIC_ERRORS,
 });
 
@@ -3509,7 +3702,7 @@ operation({
   authenticated: false,
   params: appointmentPublicIdParamsSchema,
   body: reschedulePublicBookingRequest,
-  responses: ok('`data` is the moved appointment.'),
+  responses: ok('`data` is the moved appointment.', R.publicAppointmentSchema),
   errors: PUBLIC_WRITE_ERRORS,
 });
 
@@ -3525,7 +3718,7 @@ operation({
   authenticated: false,
   params: appointmentPublicIdParamsSchema,
   body: cancelPublicBookingRequest,
-  responses: ok('`data` is the cancelled appointment.'),
+  responses: ok('`data` is the cancelled appointment.', R.publicAppointmentSchema),
   errors: PUBLIC_WRITE_ERRORS,
 });
 

@@ -15,12 +15,29 @@
  * server/seeders/20250201000100-seed-demo-workspace.js, and the demo tenant
  * that seeder builds is the subject of the reads below.
  *
- * Because that dependency is real, the spec verifies it instead of assuming it.
- * `seededAdministratorProblem()` signs in through the API before a browser is
- * opened, and every test that needs the operator skips with a sentence naming
- * what to run — a missing account, a changed `SEED_DEFAULT_PASSWORD` or an
- * account that is no longer an administrator all produce an honest skip rather
- * than eight selector failures on an unseeded database.
+ * Because that dependency is real, the spec verifies it instead of assuming it —
+ * and it separates the two very different reasons the operator might be
+ * unusable, which an earlier version of this file did not.
+ *
+ *  - **Nothing has been seeded.** A developer running the suite against a bare
+ *    database. Nothing is broken; there is simply nothing to sign in as. These
+ *    tests skip, with a message naming the command that fixes it.
+ *  - **The operator exists and is no longer an administrator**, or the login
+ *    endpoint answered in a way neither case predicts. That is a regression in
+ *    the very model these tests cover, so `beforeAll` throws. The block is
+ *    serial, so the throw reports as a failed test and the rest of the block
+ *    does not run — a red run naming the cause, which is the whole difference
+ *    from what happened before.
+ *
+ * Collapsing those two into one skip is how a suite loses coverage without
+ * anybody noticing: a seed change, or a revoked platform role, turned seven
+ * passing tests into seven silent skips while the run still reported green.
+ * A skip is invisible in a summary; a failure is not.
+ *
+ * In CI neither case is tolerated. The seed is part of the pipeline there, so
+ * "unseeded" means the pipeline is broken rather than that an engineer is
+ * working locally — `CI` therefore promotes even the honest skip to a failure,
+ * and this block can never quietly stop running on the branch that matters.
  *
  * The refusal test at the top needs none of that: it builds its own ordinary
  * user through the fixtures, which is exactly the account the guard exists to
@@ -32,15 +49,16 @@
  * "the workspace register finds the demo tenant and opens it".
  */
 import { expect, test, type Locator, type Page } from '@playwright/test';
-import { apiCall, createBookableWorkspace } from '../fixtures/api';
+import { ApiCallError, apiCall, createBookableWorkspace } from '../fixtures/api';
 import { signInAsOwner } from '../fixtures/ui';
 
 /**
  * The seeded operator.
  *
  * `MeetFlow!Demo123` is the seeder's `DEFAULT_PASSWORD`, which
- * `SEED_DEFAULT_PASSWORD` can override — one of the cases the guard below turns
- * into a skip rather than a failure.
+ * `SEED_DEFAULT_PASSWORD` can override. An override the runner does not know
+ * about is indistinguishable from an unseeded database — both are a 401 — so it
+ * lands in the skip case off CI, and in the failure case on it.
  */
 const ADMIN = {
   email: 'admin@meetflow.dev',
@@ -145,13 +163,26 @@ async function tileFigure(scope: Locator, label: string): Promise<number> {
 }
 
 /**
- * Why this spec might legitimately not run, or `null` if it can.
+ * Whether the seeded operator can be used, and if not, which kind of problem it is.
  *
- * Signs in as the seeded operator through the API and reads the platform role
- * back, so the skip message can distinguish "there is no such account" from
- * "that account is not an administrator" — two different things to fix.
+ * The two failure kinds are not interchangeable and must not share a code path:
+ *
+ *  - `unseeded` — the credentials match no account. That is what a bare
+ *    database looks like from here, and it is the only situation in which
+ *    skipping these tests is honest.
+ *  - `regression` — everything else. The account exists but has lost the
+ *    platform role; or the login endpoint answered with something other than a
+ *    401, which is not evidence about the seed at all. A skip would hide both.
+ *
+ * The 401 test is what keeps the split meaningful. Treating *any* thrown error
+ * as "unseeded" is how a 503 from a fail-closed rate limiter, or a server that
+ * is not running, would present itself as a tidy skip and take seven tests off
+ * the board without a word.
  */
-async function seededAdministratorProblem(): Promise<string | null> {
+type OperatorState =
+  { usable: true } | { usable: false; kind: 'unseeded' | 'regression'; reason: string };
+
+async function seededOperatorState(): Promise<OperatorState> {
   try {
     const session = await apiCall<{ user: { platformRole: string } }>('/api/v1/auth/login', {
       method: 'POST',
@@ -159,22 +190,45 @@ async function seededAdministratorProblem(): Promise<string | null> {
     });
 
     if (session.user.platformRole !== 'ADMIN') {
-      return (
-        `${ADMIN.email} signs in, but its platform role is ${session.user.platformRole} rather ` +
-        'than ADMIN. Platform administration cannot be granted through the API, so there is ' +
-        'nothing this spec can sign in as. Re-run the demo seeder to restore it.'
-      );
+      return {
+        usable: false,
+        kind: 'regression',
+        reason:
+          `${ADMIN.email} signs in, but its platform role is ${session.user.platformRole} ` +
+          'rather than ADMIN. The account is there, so this is not an unseeded database — ' +
+          'something revoked the role, and every assertion in this block is about a surface ' +
+          'that role opens. Failing rather than skipping is the point: a silent skip here is ' +
+          'exactly how the platform panel would stop being tested at all.',
+      };
     }
-    return null;
+    return { usable: true };
   } catch (error) {
-    return (
-      `Could not sign in as the seeded platform administrator ${ADMIN.email}. This spec is the ` +
-      'only one in the suite that needs seeded data, because platform admin cannot be ' +
-      'self-served — run SEED_ENABLED=true npm run db:seed from the repository root. The API ' +
-      // Appended last and without punctuation after it, because the server's
-      // messages end in a full stop of their own.
-      `said: ${error instanceof Error ? error.message : String(error)}`
-    );
+    const status = error instanceof ApiCallError ? error.status : null;
+    // Appended last and without punctuation after it, because the server's
+    // messages end in a full stop of their own.
+    const said = `The API said: ${error instanceof Error ? error.message : String(error)}`;
+
+    if (status === 401) {
+      return {
+        usable: false,
+        kind: 'unseeded',
+        reason:
+          `No account matches the seeded platform administrator ${ADMIN.email}. This spec is ` +
+          'the only one in the suite that needs seeded data, because platform admin cannot be ' +
+          'self-served — run SEED_ENABLED=true npm run db:seed from the repository root. ' +
+          said,
+      };
+    }
+
+    return {
+      usable: false,
+      kind: 'regression',
+      reason:
+        `Signing in as ${ADMIN.email} failed with ${status ?? 'no HTTP status'}, which is ` +
+        'neither "this database was never seeded" (a 401) nor a usable session. Whatever it ' +
+        'is, it is not a reason to quietly stop testing the platform panel. ' +
+        said,
+    };
   }
 }
 
@@ -231,24 +285,45 @@ test.describe('platform administration', () => {
 
   let page: Page;
 
-  /** Non-null when the seeded operator is unusable; every test then skips with it. */
-  let unavailable: string | null = null;
+  /** Decided once, in `beforeAll`; consulted by every test through the hook below. */
+  let operator: OperatorState = { usable: true };
 
   test.beforeAll(async ({ browser }) => {
     page = await browser.newPage();
-    unavailable = await seededAdministratorProblem();
-    // Signing in through the UI is left undone when there is nothing to sign in
-    // as: it would fail inside a hook, and a failing hook reports itself rather
-    // than the skip reason that explains it.
-    if (unavailable === null) await signInAsOwner(page, ADMIN.email, ADMIN.password);
+    operator = await seededOperatorState();
+
+    if (!operator.usable) {
+      /*
+       * The two situations part company here, and this is the whole fix.
+       *
+       * A regression throws out of the hook, which Playwright reports as the
+       * first test failing with this message and the rest of the serial block
+       * as "did not run" — a red run, naming the cause, exiting non-zero,
+       * rather than seven green skips that nobody reads. An unseeded database
+       * is allowed to skip, but only off CI: over there the seeder runs as
+       * part of the pipeline, so "unseeded" means the pipeline is broken and
+       * a skip would hide that too.
+       */
+      if (operator.kind === 'regression' || process.env.CI) {
+        throw new Error(operator.reason);
+      }
+      // Signing in through the UI is left undone when there is nothing to sign
+      // in as: it would fail inside a hook, and a failing hook reports itself
+      // rather than the skip reason that explains it.
+      return;
+    }
+
+    await signInAsOwner(page, ADMIN.email, ADMIN.password);
   });
 
   test.afterAll(async () => {
     await page.close();
   });
 
+  // Reached only for an unseeded database off CI — every other unusable state
+  // has already thrown above.
   test.beforeEach(() => {
-    test.skip(unavailable !== null, unavailable ?? '');
+    test.skip(!operator.usable, operator.usable ? '' : operator.reason);
   });
 
   /** The platform sidebar is the only navigation this shell has, so the tests use it. */

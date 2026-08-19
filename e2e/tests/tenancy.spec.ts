@@ -60,7 +60,11 @@ test.describe('cross-tenant isolation', () => {
           customer: { firstName: 'Cross', lastName: 'Tenant', email: 'cross@meetflow.test' },
         },
       }),
-    ).rejects.toThrow(/404|409|422/);
+      // 404 alone. A 409 is an ordinary slot conflict and a 422 an ordinary
+      // validation failure, and either would let this pass with the tenancy
+      // guard never running — the assertion has to be the one thing only the
+      // guard produces.
+    ).rejects.toThrow(/404/);
   });
 
   test('management endpoints reject an unauthenticated caller', async () => {

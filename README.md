@@ -28,8 +28,9 @@ surrounding surface are still being closed.
 
 |              |                                                                 |
 | ------------ | --------------------------------------------------------------- |
-| Server tests | **366 passing** (unit + integration, real PostgreSQL)           |
-| End-to-end   | **43 passing** (Playwright, real stack, no mocks)               |
+| Server tests | **509 passing** (unit + integration, real PostgreSQL)           |
+| Client tests | **36 passing** (unit, the pure display and money helpers)       |
+| End-to-end   | **46 passing** (Playwright, real stack, no mocks)               |
 | Typecheck    | clean, strict, across server + client + e2e                     |
 | Lint         | clean                                                           |
 | Builds       | server and client both build; production image runs as non-root |
@@ -274,10 +275,17 @@ verified rather than assumed.
 Stated plainly, so nothing here is mistaken for finished work.
 
 - **Workflow automation rules.** The `automation_rules` and
-  `automation_executions` tables exist and are documented, but there is no API
-  and no engine that evaluates them. The event-driven behaviour the product
-  actually relies on (confirmations, reminders, waitlist offers, real-time
-  updates) is implemented directly and does not depend on this.
+  `automation_executions` tables exist and a queue name is reserved in
+  `server/src/jobs/queues.ts`, but there is no API and no engine that evaluates
+  them, and no queue instance is constructed for that name. The event-driven
+  behaviour the product actually relies on (confirmations, reminders, waitlist
+  offers, real-time updates) is implemented directly and does not depend on
+  this.
+- **Per-workspace notification templates.** `notification_templates` is created
+  by migration and read by `resolveTemplate`, but nothing ever writes it — no
+  seeder, no route — so every message uses the built-in default and the
+  `TEMPLATES_MANAGE` permission guards no endpoint. See
+  [docs/NotificationArchitecture.md](docs/NotificationArchitecture.md#templates).
 - **SMS and in-app notification channels.** The outbox models them and the
   worker closes such rows out honestly as `CANCELLED` with a reason rather than
   reporting them delivered. Only email has a provider.

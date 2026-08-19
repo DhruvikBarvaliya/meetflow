@@ -33,6 +33,7 @@ import { ConflictError, ErrorCode, NotFoundError, ValidationError } from '../../
 import { isValidTimezone } from '../../utils/time';
 import { AuditActions, recordAudit } from '../audit/audit.service';
 import type { RequestMetadata } from '../auth/auth.service';
+import { invalidateBookingPageCache } from '../publicBooking/publicBooking.cache';
 import type {
   CreateStaffBody,
   ListStaffQuery,
@@ -299,6 +300,10 @@ export async function createStaffProfile(
       { transaction },
     );
 
+    // A provider the workspace can offer is part of every published page that
+    // reaches them through a service they deliver.
+    await invalidateBookingPageCache(businessId, transaction);
+
     log.info({ businessId, staffProfileId: staff.id, userId }, 'staff profile created');
     return staff;
   });
@@ -391,6 +396,11 @@ export async function updateStaffProfile(
       { transaction },
     );
 
+    // `displayName`, `isBookable` and `isActive` are all quoted on the public
+    // page; a provider turned off has to stop being offered now, not when the
+    // TTL happens to lapse.
+    await invalidateBookingPageCache(businessId, transaction);
+
     return staff;
   });
 }
@@ -435,6 +445,8 @@ export async function deleteStaffProfile(
       },
       { transaction },
     );
+
+    await invalidateBookingPageCache(businessId, transaction);
 
     log.info({ businessId, staffProfileId: staff.id }, 'staff profile deleted');
   });

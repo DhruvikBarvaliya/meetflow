@@ -160,6 +160,80 @@ on resolved IPs is required before exposing webhooks to untrusted tenants.
 - Destructive operations require an explicit `*_MANAGE` permission and refuse
   when active appointments still reference the record.
 
+## Dependency advisories
+
+Accepted advisories and why, so a reader who runs `npm audit` and finds red is
+not left guessing whether anyone looked.
+
+`npm audit --omit=dev` reports **3 vulnerabilities (1 high, 2 moderate)** as of
+2026-08-19. Dev dependencies are excluded because they never reach a deployed
+artefact; the numbers below are what actually ships.
+
+### `nodemailer` — 1 high, eight advisories (accepted, not fixed)
+
+npm counts the package once at its worst severity. The eight advisories behind
+that single line are led by
+[GHSA-mm7p-fcc7-pg87](https://github.com/advisories/GHSA-mm7p-fcc7-pg87)
+(**high** — "email to an unintended domain" via an address-parsing
+interpretation conflict), with
+[GHSA-rcmh-qjqh-p98v](https://github.com/advisories/GHSA-rcmh-qjqh-p98v)
+(addressparser DoS on recursion) and six injection/bypass issues in
+`envelope.size`, transport `name` (EHLO/HELO CRLF), `List-*` header comments,
+`jsonTransport`, message-level `raw`, and OAuth2 token-fetch TLS validation.
+
+**Exposure — most of the vulnerable surface is not reachable from this
+product.** `SmtpEmailProvider` in
+`server/src/integrations/email/emailProvider.ts` is the only nodemailer call
+site, and it passes exactly `from`, `to`, `subject`, `text` and `html`. It never
+sets `envelope`, `list`, `raw`, a transport `name`, or attachments; it never
+uses `jsonTransport`; and `auth` is plain SMTP user/password, never OAuth2. Six
+of the eight advisories therefore have no path to them at all.
+
+The two that do touch a live path are the address-parsing pair, and both are
+bounded before nodemailer sees anything. `to` is always a single address read
+from `notifications.recipient_address`, and every ingress that can put an
+address there — registration, member invite, customer create/update, public
+booking, public waitlist, location contact — runs it through a Zod schema that
+trims, lower-cases, applies `.email()` and caps the length: `.max(254)`
+everywhere except the member invite, which is `.max(255)` to agree with its
+unique index. The schemas are per-module rather than one shared constant, so
+the caps differ by a byte and only `auth`, `customers` and the two public
+surfaces also carry `.min(3)` — none of which changes the property relied on
+here, which is that no unvalidated string reaches the column. A multi-`@`
+address, a CRLF, or a string long enough to matter for the recursive-parse DoS
+is a 422 at the edge and never becomes a row. Residual risk is a workspace
+operator, already authenticated, mailing an address of their own choosing —
+which they can do by typing it into any mail client.
+
+**Why it is not fixed:** the only remedy is `nodemailer@9`, a major version
+whose `createTransport` options and `SentMessageInfo` shape both changed. That
+is a breaking upgrade to the one integration standing between this product and
+every customer-facing email, and it is not worth taking blind while the
+reachable surface is a validated single recipient.
+
+**Revisit when any of these becomes true:**
+
+- the email adapter starts passing `attachments`, `envelope`, `list`, `raw`,
+  `headers`, or a custom transport `name`;
+- SMTP auth moves to OAuth2 (Gmail/Microsoft 365 relays require it);
+- an address reaches `to` from anywhere that is not the validated schema above —
+  a bulk import, an admin free-text field, a reply-to derived from a request;
+- a further advisory lands on a `6.x` path this product _does_ use.
+
+Until then this is an accepted risk, re-checked whenever `npm audit` is run.
+
+### `uuid` via `sequelize` — 2 moderate (accepted, not fixed)
+
+[GHSA-w5hq-g745-h8pq](https://github.com/advisories/GHSA-w5hq-g745-h8pq): a
+missing buffer bounds check in `uuid` v3/v5/v6 **when a `buf` argument is
+supplied**. Sequelize touches `uuid` in exactly one place
+(`lib/utils.js`), to produce `UUIDV1`/`UUIDV4` column defaults — never v3, v5 or
+v6, and never with a buffer — so the vulnerable branch is unreachable from any
+call this product makes. `npm audit fix --force` would
+resolve it by installing `sequelize@3.30.0` — a downgrade of five major
+versions, which is not a fix. Revisit when Sequelize 6 bumps its own `uuid`
+range, or at the Sequelize 7 upgrade.
+
 ## Known gaps
 
 Stated plainly rather than omitted:
@@ -172,7 +246,9 @@ Stated plainly rather than omitted:
 5. **Signing secrets are stored in plaintext** in `webhook_endpoints`. They
    should be encrypted at rest with a KMS-managed key.
 6. **No automated dependency or container scanning** in the repository yet
-   (`npm audit`, Trivy or equivalent should run in CI).
+   (`npm audit`, Trivy or equivalent should run in CI). The advisories currently
+   outstanding are accepted deliberately and recorded above under
+   [Dependency advisories](#dependency-advisories).
 7. ~~**`/api/docs` is unauthenticated**~~ — **closed.** The docs router is no
    longer mounted when `APP_ENV=production`; the contract is generated for
    production consumers with `npm run contracts:export` instead.

@@ -2,8 +2,8 @@
  * Background job infrastructure (BullMQ on Redis).
  *
  * MeetFlow never does slow or failure-prone work inside an HTTP request.
- * Email delivery, webhook fan-out, automation evaluation and periodic
- * housekeeping all run here, where they can retry with backoff.
+ * Email delivery, webhook fan-out and periodic housekeeping all run here,
+ * where they can retry with backoff.
  *
  * Durability model: Redis holds the *queue*, PostgreSQL holds the *intent*.
  * Every notification and webhook has a row before a job exists, and periodic
@@ -20,6 +20,20 @@ const log = createLogger('queues');
 export const QUEUE_NAMES = {
   notifications: 'meetflow.notifications',
   webhooks: 'meetflow.webhooks',
+  /**
+   * Reserved, not live. No `Queue` is constructed for this name, so nothing
+   * produces to it and no worker consumes from it.
+   *
+   * It is kept rather than deleted for the same reason `AutomationRule` and
+   * `AutomationExecution` are kept: the workflow automation engine is disclosed
+   * in the README and `docs/ProductRequirements.md` as modelled-but-not-built,
+   * and naming the queue here is what stops a later implementation inventing a
+   * second name for a stream that already has one. Deleting it would make that
+   * disclosure ("models and queue reserved") untrue.
+   *
+   * If it is ever wired up, add it to `allQueues` — the shutdown path closes
+   * that list and nothing else.
+   */
   automations: 'meetflow.automations',
   maintenance: 'meetflow.maintenance',
 } as const;

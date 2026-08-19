@@ -1,5 +1,5 @@
 /**
- * Appointment lifecycle: reschedule, cancel, approve, reject, check-in,
+ * Appointment lifecycle: reschedule, cancel, approve, reject, check-in, start,
  * complete and no-show.
  *
  * Three principles run through all of it:
@@ -7,7 +7,9 @@
  *  1. **History is never overwritten.** A reschedule keeps the appointment's
  *     identity (so the customer's management link never breaks) and records the
  *     move in `reschedule_history`; every status change appends to
- *     `appointment_status_history`. Nothing is silently mutated away.
+ *     `appointment_status_history`. Nothing is silently mutated away — and that
+ *     includes movements that change no status at all, which is why check-in
+ *     writes its own row rather than only stamping a column.
  *
  *  2. **Reservations are re-claimed, never slid.** Moving an appointment
  *     re-runs the reservation it made at booking time against the new window:
@@ -1273,14 +1275,67 @@ export async function rejectAppointment(input: TransitionInput): Promise<Appoint
   return updated;
 }
 
-/** Records arrival. Does not change status; the sweep promotes to IN_PROGRESS. */
+/**
+ * Records arrival. Does not change status; the sweep promotes to IN_PROGRESS.
+ *
+ * The one movement in this file that cannot go through `transition()`, because
+ * `transition` exists to write a new status and there is no new status here.
+ * What it must not lose with it is the evidence: arrival is the most disputable
+ * fact in a diary — "they never turned up" against "they were here at 10:05" is
+ * exactly the argument a business needs a record of — so the audit row and the
+ * status-history row `transition` would have written are written by hand
+ * instead, in one transaction with the column they describe. The history row
+ * carries `fromStatus === toStatus` to say what happened: the appointment stood
+ * still while something happened to it.
+ *
+ * A second check-in overwrites `checkedInAt` and appends another history row.
+ * The column answers "when did they arrive" with the latest correction; the
+ * history keeps every arrival time that was ever claimed, including the one
+ * that was corrected away.
+ */
 export async function checkInAppointment(input: TransitionInput): Promise<Appointment> {
-  const appointment = await loadAppointment(input.businessId, input.appointmentId);
-  if (!ACTIVE_APPOINTMENT_STATUSES.includes(appointment.status)) {
-    throw new InvalidStateTransitionError(appointment.status, 'IN_PROGRESS');
-  }
-  await appointment.update({ checkedInAt: new Date() });
+  const appointment = await sequelize.transaction(async (transaction) => {
+    const loaded = await loadAppointment(input.businessId, input.appointmentId, transaction, true);
+    if (!ACTIVE_APPOINTMENT_STATUSES.includes(loaded.status)) {
+      throw new InvalidStateTransitionError(loaded.status, 'IN_PROGRESS');
+    }
 
+    const previousCheckedInAt = loaded.checkedInAt;
+    const checkedInAt = new Date();
+    await loaded.update({ checkedInAt }, { transaction });
+
+    await appendHistory(
+      loaded,
+      loaded.status,
+      loaded.status,
+      input.actor,
+      input.reason ?? 'Customer checked in.',
+      { event: 'checked_in', checkedInAt, previousCheckedInAt },
+      transaction,
+    );
+
+    await recordAudit(
+      {
+        businessId: loaded.businessId,
+        actorType: input.actor.type === 'CUSTOMER' ? 'CUSTOMER' : 'USER',
+        actorUserId: input.actor.userId ?? null,
+        actorLabel: input.actor.label ?? null,
+        action: AuditActions.APPOINTMENT_CHECKED_IN,
+        entityType: 'appointment',
+        entityId: loaded.id,
+        requestId: input.metadata?.requestId,
+        ipAddress: input.metadata?.ipAddress,
+        metadata: { status: loaded.status, checkedInAt, previousCheckedInAt },
+      },
+      { transaction },
+    );
+
+    return loaded;
+  });
+
+  // After the commit, like every other announcement here: a client told about
+  // an arrival that then rolled back would show a customer standing in a
+  // waiting room they never reached.
   emitAppointmentEvent(
     SocketEvents.appointmentUpdated,
     {
@@ -1288,9 +1343,33 @@ export async function checkInAppointment(input: TransitionInput): Promise<Appoin
       staffProfileId: appointment.staffProfileId,
       appointmentId: appointment.id,
     },
-    { appointmentId: appointment.id, checkedInAt: appointment.checkedInAt },
+    {
+      appointmentId: appointment.id,
+      publicId: appointment.publicId,
+      status: appointment.status,
+      checkedInAt: appointment.checkedInAt,
+    },
   );
   return appointment;
+}
+
+/**
+ * Promotes a checked-in appointment whose start time has passed.
+ *
+ * Exported for the maintenance sweep, which is its only caller. It is a
+ * function here rather than an `update()` over there so the promotion is
+ * audited and appended to the appointment's history like every other movement:
+ * "when did this visit start" is answered by the same timeline that answers
+ * when it was booked, approved and finished, whoever — or whatever — moved it.
+ */
+export async function startAppointment(input: TransitionInput): Promise<Appointment> {
+  return transition(
+    input,
+    'IN_PROGRESS',
+    () => ({ startedAt: new Date() }),
+    AuditActions.APPOINTMENT_STARTED,
+    SocketEvents.appointmentUpdated,
+  );
 }
 
 export async function completeAppointment(input: TransitionInput): Promise<Appointment> {

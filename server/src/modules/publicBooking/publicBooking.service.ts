@@ -920,6 +920,14 @@ export async function createPublicBooking(
     serviceId: input.serviceId,
     staffProfileId,
     locationId: input.locationId ?? resolved.link.locationId ?? matched?.locationId ?? null,
+    // The same two ids before Smart Match had a say in them. With no preference
+    // expressed they are null, and stay null on a retry — which is what keeps a
+    // retry that lands on a different provider a retry rather than a rejected
+    // reuse of the idempotency key.
+    requested: {
+      staffProfileId: chosenStaffId,
+      locationId: input.locationId ?? resolved.link.locationId ?? null,
+    },
     startsAt: input.startsAt,
     timezone: input.timezone,
     customer: {

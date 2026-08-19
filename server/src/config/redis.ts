@@ -2,10 +2,17 @@
  * Redis connectivity and the MeetFlow key registry.
  *
  * Redis provides caching, distributed rate limiting, advisory locks, the BullMQ
- * job backbone, the Socket.IO adapter and short-lived idempotency state.
- * It is deliberately NOT the system of record: every function that touches
- * cached data degrades to "cache miss" when Redis is unavailable, so a Redis
- * outage slows MeetFlow down without taking booking correctness with it.
+ * job backbone and the Socket.IO adapter. It is deliberately NOT the system of
+ * record: every function that touches cached data degrades to "cache miss" when
+ * Redis is unavailable, so a Redis outage slows MeetFlow down without taking
+ * booking correctness with it.
+ *
+ * Idempotency is the clearest case of that rule and is deliberately absent from
+ * this file: `idempotency_keys` in PostgreSQL is claimed by a unique index and
+ * read back inside the booking transaction, so a retry is answered correctly
+ * whatever Redis is doing. A Redis fast path in front of it could only be an
+ * advisory hint, and one that is wrong during exactly the outage a retry storm
+ * happens in.
  */
 import { Redis, type RedisOptions } from 'ioredis';
 import { env } from './env';
@@ -16,30 +23,28 @@ const log = createLogger('redis');
 /**
  * Central registry of every Redis key MeetFlow writes.
  *
- * | namespace      | purpose                                   | TTL         | invalidation                    |
- * |----------------|-------------------------------------------|-------------|---------------------------------|
- * | cache:link     | public booking-link configuration         | configurable| on link/service/staff mutation  |
- * | cache:services | public service catalogue for a link       | configurable| on service mutation             |
- * | rl:*           | rate-limiter-flexible counters            | window       | natural expiry                  |
- * | lock:*         | advisory locks around slot/resource writes| ≤ 15s       | released by owner token         |
- * | idem:*         | public booking idempotency records        | IDEMPOTENCY | natural expiry                  |
- * | rr:*           | round-robin cursor cache (advisory only)  | 1h          | recomputed from DB on miss      |
+ * | namespace     | purpose                              | TTL          | invalidation                  |
+ * |---------------|--------------------------------------|--------------|-------------------------------|
+ * | cache:link    | public booking-link configuration    | configurable | dropped by key when a link,   |
+ * |               |                                      |              | service or assignment changes |
+ * | lock:slot     | advisory lock around one slot        | ≤ 10s        | released by owner token       |
+ * | lock:waitlist | serialises waitlist evaluation       | ≤ 15s        | released by owner token       |
+ * | rl:*          | rate-limiter counters, whose prefix  | window       | natural expiry                |
+ * |               | `middleware/rateLimit.ts` composes   |              |                               |
+ * |               | itself — the limiter wants a prefix, |              |                               |
+ * |               | not a finished key                   |              |                               |
  *
  * Values are JSON unless noted. Every key is written through `key()` so the
  * configured prefix keeps environments isolated on a shared Redis instance.
+ * Nothing is listed here that nothing writes: a builder with no callers reads
+ * as a guarantee the system makes and does not.
  */
 export const RedisKeys = {
   bookingLinkConfig: (slug: string) => `cache:link:${slug}`,
-  bookingLinkServices: (linkId: string) => `cache:services:${linkId}`,
-  businessCacheTag: (businessId: string) => `cache:tag:business:${businessId}`,
-  idempotency: (scope: string, key: string) => `idem:${scope}:${key}`,
   appointmentSlotLock: (businessId: string, staffId: string, startsAtIso: string) =>
     `lock:slot:${businessId}:${staffId}:${startsAtIso}`,
-  resourceLock: (resourceId: string) => `lock:resource:${resourceId}`,
   waitlistEvaluationLock: (businessId: string, serviceId: string) =>
     `lock:waitlist:${businessId}:${serviceId}`,
-  roundRobinCursor: (serviceId: string) => `rr:service:${serviceId}`,
-  rateLimit: (bucket: string) => `rl:${bucket}`,
 } as const;
 
 /** Applies the environment prefix. All access goes through this. */
@@ -138,36 +143,26 @@ export async function cacheSet(rawKey: string, value: unknown, ttlSeconds: numbe
   }
 }
 
+/**
+ * Drops entries by exact key.
+ *
+ * The only cached family MeetFlow keeps is one page per booking-link slug, and
+ * a workspace's slugs are one indexed query away in PostgreSQL — so the keys to
+ * delete are always knowable, and a `SCAN` over a keyspace that is mostly BullMQ
+ * and rate-limiter entries would be a slower way of finding a handful of them.
+ * That is why there is no prefix-deletion helper here to reach for.
+ *
+ * Failure is swallowed: an invalidation that raised would fail the edit that
+ * triggered it, and a stale page is a far smaller problem than an operator who
+ * cannot change a price. Entries carry a TTL for exactly this reason.
+ */
 export async function cacheDelete(...rawKeys: string[]): Promise<void> {
   if (!isRedisReady() || rawKeys.length === 0) return;
   try {
     await redis.del(...rawKeys.map(key));
   } catch (error) {
-    log.warn({ err: error, keys: rawKeys }, 'cache invalidation failed');
+    log.warn({ err: error, keys: rawKeys }, 'cache invalidation failed — entries will expire');
   }
-}
-
-/**
- * Invalidate by prefix using SCAN (never KEYS — KEYS blocks the server).
- * Used when a business-wide change makes a family of cached entries stale.
- */
-export async function cacheDeleteByPrefix(rawPrefix: string): Promise<number> {
-  if (!isRedisReady()) return 0;
-  const match = `${key(rawPrefix)}*`;
-  let cursor = '0';
-  let removed = 0;
-  try {
-    do {
-      const [next, batch] = await redis.scan(cursor, 'MATCH', match, 'COUNT', 200);
-      cursor = next;
-      if (batch.length > 0) {
-        removed += await redis.del(...batch);
-      }
-    } while (cursor !== '0');
-  } catch (error) {
-    log.warn({ err: error, prefix: rawPrefix }, 'prefix cache invalidation failed');
-  }
-  return removed;
 }
 
 // ---------------------------------------------------------------------------

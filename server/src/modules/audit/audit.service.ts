@@ -76,6 +76,12 @@ export const AuditActions = {
   APPOINTMENT_REJECTED: 'appointment.rejected',
   APPOINTMENT_RESCHEDULED: 'appointment.rescheduled',
   APPOINTMENT_CANCELLED: 'appointment.cancelled',
+  // Arrival and start are their own verbs rather than APPOINTMENT_UPDATED,
+  // which covers edits to an appointment's fields. Both answer questions a
+  // business gets asked and an edit log cannot: "they never turned up" against
+  // "they were here at 10:05", and when the visit actually began.
+  APPOINTMENT_CHECKED_IN: 'appointment.checked_in',
+  APPOINTMENT_STARTED: 'appointment.started',
   APPOINTMENT_COMPLETED: 'appointment.completed',
   APPOINTMENT_NO_SHOW: 'appointment.no_show',
   APPOINTMENT_UPDATED: 'appointment.updated',

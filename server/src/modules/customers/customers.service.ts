@@ -739,7 +739,13 @@ async function countBlockingAppointments(
       businessId,
       status: { [Op.in]: [...ACTIVE_APPOINTMENT_STATUSES] },
       endsAt: { [Op.gt]: new Date() },
-      [Op.or]: [{ customerId }, { '$participants.customerId$': customerId }],
+      // `customer_id`, not `customerId`. Sequelize emits a `$…$` reference
+      // verbatim rather than mapping it through the model's attribute names, so
+      // the camelCase form reached PostgreSQL as `participants.customerId` and
+      // every deletion answered 500 with `column does not exist`. It survived
+      // because the only test covering this route asserts a 403 and never
+      // reaches the query.
+      [Op.or]: [{ customerId }, { '$participants.customer_id$': customerId }],
     },
     include: [
       {
