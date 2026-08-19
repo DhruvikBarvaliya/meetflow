@@ -393,6 +393,13 @@
     <p class="standfirst">Eight auditors, working from the original 2,081-line specification rather than from anyone's memory of it. Fifty-three findings.</p>
   </header>
 
+  <section class="verdict" style="border-color:#2f7a4f;background:rgba(47,122,79,.08)">
+    <h2 style="margin-top:0">This is a record, not a backlog — all fifty-three are closed</h2>
+    <p><strong>Every finding below has been fixed.</strong> The page is kept because what an audit found is worth remembering, and because several of the fixes only make sense next to the problem that prompted them. Nothing on this page describes the code as it stands.</p>
+    <p>Where a finding named a limitation, the current standing is in <a href="ProductRequirements.md">ProductRequirements.md</a>; where it named a security gap, in <a href="SecurityThreatModel.md">SecurityThreatModel.md</a>. Both are maintained; this is not.</p>
+    <p>Closing them also turned up defects the audit had missed — non-atomic refresh-token rotation, and <code>DELETE /customers/:id</code> answering 500 in every workspace — both found by tests written for other findings.</p>
+  </section>
+
   <section class="verdict">
     <h2 style="margin-top:0">Verdict</h2>
     <p><strong>Not complete against the spec's own release checklist</strong> — but the incompleteness sits at the edges, not the core. The engineering that is hard to fake is done properly: booking concurrency is enforced by real PostgreSQL exclusion constraints and proven by a ten-way race test, DST is handled in both directions, tenant reads answer 404 rather than 403, and 130 mounted routes match 130 OpenAPI operations and 130 Postman requests exactly.</p>

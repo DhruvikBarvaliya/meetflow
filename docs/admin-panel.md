@@ -32,8 +32,14 @@ other.
 
 `/api/v1/admin` is a third router beside the public booking routes and the
 authenticated management routes. It is mounted behind
-`authenticate → apiRateLimit → requirePlatformAdmin`, and pointedly **not**
-behind `requireTenant`.
+`authenticate → apiRateLimit → requirePlatformAdmin → requireVerifiedEmail`, and
+pointedly **not** behind `requireTenant`.
+
+The operator check runs before the verification one on purpose: somebody who is
+not an operator is told that and nothing about the state of their own account on
+a URL they have no business on. An operator whose own address is unconfirmed is
+refused too — it is the highest-value account in the system and the last place
+to make an exception.
 
 An operator holds no membership in the workspaces they administer, and tenant
 resolution refuses a request without one — with a 404, so it cannot be used to

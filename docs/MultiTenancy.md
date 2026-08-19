@@ -53,14 +53,23 @@ tenant-scoped query into a global one. Failing loudly is the point.
 
 ## Authorisation is separate from tenancy
 
-Two distinct questions, answered by two distinct middlewares:
+Three distinct questions, answered by three distinct middlewares:
 
 - `requireTenant` — _which workspace_ is this request in?
+- `requireVerifiedEmail` — has this account _confirmed the address_ it was
+  opened with?
 - `requirePermission` — _may this member_ perform this action there?
 
 Holding `appointments:cancel` says nothing about which tenant's appointments are
 reachable. Conflating the two is how "admin in workspace A" becomes "admin
 everywhere".
+
+The verification gate runs **after** tenant resolution on the management
+surface, and the order matters: reversed, an invited colleague who has signed in
+but not yet accepted is told to confirm an address that no link was ever sent to,
+when their next step is to accept the invitation. Behind tenant resolution they
+get the 404 that has always meant "no active membership here". See
+[SecurityThreatModel.md](SecurityThreatModel.md#email-verification--closed).
 
 ### Permissions
 

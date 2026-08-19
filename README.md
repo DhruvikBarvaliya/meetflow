@@ -133,6 +133,27 @@ If your machine already runs PostgreSQL or Redis, set `POSTGRES_HOST_PORT` and
 `REDIS_HOST_PORT` in `.env` (and match `DATABASE_URL` / `REDIS_URL`) — the
 compose file reads them.
 
+`npm run db:reset` drops every table, re-migrates and re-seeds, for when a
+local database has accumulated more test data than it is worth reading.
+
+### Registering your own account
+
+The seeded accounts below are ready to use. An account you register yourself is
+not, and that is deliberate: `REQUIRE_EMAIL_VERIFICATION` is on by default, so a
+new registration lands on "Confirm your email address" and can do nothing else
+until it does.
+
+There is no mail server in the local stack — `EMAIL_PROVIDER=console` writes the
+message to the worker's log — so the link is one command away:
+
+```bash
+npm run verification-link -- you@example.test
+```
+
+It reads the same outbox row the delivery worker reads, so the link is the real
+one and opening it exercises the real endpoint. The button on the screen ("Send
+another link") works too, and puts a fresh link in the same place.
+
 ### Demo accounts
 
 The seed builds one workspace, Aurora Wellness Studio in Bengaluru, and the

@@ -12,12 +12,12 @@ compounds.
 
 **Status vocabulary**
 
-|               |                                                                                     |
-| ------------- | ----------------------------------------------------------------------------------- |
-| **Met**       | Built, and covered by a test that would fail if it regressed.                       |
-| **Partial**   | Built, with a named limitation.                                                     |
-| **Not built** | Absent, deliberately, and disclosed.                                                |
-| **Gap**       | Required, absent, and not yet addressed. Tracked in [GapAudit.html](GapAudit.html). |
+|               |                                                                                                                                                        |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Met**       | Built, and covered by a test that would fail if it regressed.                                                                                          |
+| **Partial**   | Built, with a named limitation.                                                                                                                        |
+| **Not built** | Absent, deliberately, and disclosed.                                                                                                                   |
+| **Gap**       | Required, absent, and not yet addressed. None remain; the audit that found the last fifty-three is kept as a record in [GapAudit.html](GapAudit.html). |
 
 ---
 
@@ -52,10 +52,13 @@ requirements most worth protecting in review.
 Multi-service catalogue, multi-staff, multi-location, multi-resource, with roles
 and permissions inside a workspace.
 
-**Standing: Partial.** All five dimensions are modelled and enforced. The
-limitation is membership: a workspace can be created with an owner, and no API
-can add a second member, so Manager, Receptionist and Staff exist as fully
-enforced roles that a real deployment cannot reach. See gap 01.
+**Standing: Met.** All five dimensions are modelled and enforced, and every one
+of the four roles is now reachable: `POST /members/invite` creates the
+membership, `GET /members/invitations` and `POST /members/accept` let the
+invitee join, and `roles.spec.ts` exercises Staff, Receptionist and Manager
+end to end. Accepting an invitation also confirms the address, because the
+invitation was sent to it and no verification link is ever sent to an account
+the invitation itself created.
 
 ### B. Advanced scheduling engine
 
@@ -63,12 +66,14 @@ Per-service duration, buffers, capacity, notice and horizon; per-staff weekly
 rules, overrides, holidays and blackouts; DST-correct wall-clock semantics;
 group services; resource requirements.
 
-**Standing: Partial.** The engine is the strongest part of the product — see
+**Standing: Met.** The engine is the strongest part of the product — see
 [SchedulingEngine.md](SchedulingEngine.md) and [TimezoneAndDST.md](TimezoneAndDST.md).
-Known limitations: resource availability is not an input to slot search (gap 25),
-location-scoped holidays and overrides are accepted and not applied (gap 27),
-and per-customer booking caps are enforced at commit but invisible in search
-(gap 26).
+The three limitations recorded here previously are closed: `resourceEngine.ts`
+makes room and equipment availability an input to the search rather than a
+surprise at submit, holidays and overrides carry their `locationId` through it
+so a closure at one branch no longer shuts the workspace, and a slot beyond a
+per-customer cap is rejected as `LIMIT_REACHED` in the search instead of only at
+commit.
 
 ### C. Intelligent scheduling
 
@@ -83,9 +88,11 @@ match — resolved deterministically.
 Per-workspace customer records, history, preferences, notes, and a portal for
 the customer's own bookings.
 
-**Standing: Partial.** Records, history and preferences exist and are correct.
-The portal is reachable only by a user who also holds a workspace membership,
-because there is no customer identity — see gap 02.
+**Standing: Met.** Records, history and preferences exist and are correct, and
+a customer is now an identity the system authenticates in its own right:
+`/api/v1/me` is a surface of its own, mounted above the management router
+precisely so somebody with no membership can use it. Verifying an address is
+what links the bookings already made against it to the account.
 
 ### E. Workflow automation
 
@@ -99,41 +106,50 @@ in the README.
 
 Customers wait for a slot and are offered it when one frees.
 
-**Standing: Partial.** Entries, matching and offer notifications work and are
-triggered on cancellation. The offer email links to a claim URL that has no
-route behind it, and rejection and reschedule-away do not trigger matching —
-gaps 19 and 49.
+**Standing: Met.** Entries, matching and offer notifications work, and all three
+transitions that free a slot now reach the matcher through one `offerFreedSlot`
+helper — cancellation, rejection and moving an appointment away from a time.
+`publicWaitlistRouter` is mounted, so the claim link in the offer email leads
+somewhere; before it was, every offer email ended at a 404.
 
 ### G. Resource scheduling
 
 Rooms, equipment and vehicles reserved alongside the appointment, with capacity.
 
-**Standing: Partial.** Reservation at booking is correct and concurrency-safe.
-Reschedule moves the reservation without re-checking capacity — gap 14.
+**Standing: Met.** Reservation at booking is correct and concurrency-safe, and
+a reschedule now re-claims the reservation under the same `SELECT … FOR UPDATE`
+capacity check rather than sliding the rows with a bare `UPDATE` — an exclusion
+constraint cannot express "at most N", so the row lock is the only thing that
+can.
 
 ### H. Booking policies
 
 Approval, notice, horizon, cancellation and reschedule deadlines, per-customer
 limits.
 
-**Standing: Partial.** Resolved per service, then workspace. `requiresApproval`
-on a booking link is settable and not consulted — gap 23.
+**Standing: Met.** Resolved per booking link, then service, then workspace —
+`requiresApproval` on a link is consulted at both the public and the staff-side
+booking paths, so a link that asks for approval gets it whatever the service and
+workspace say.
 
 ### I. Real-time collaboration
 
 Live diary updates across connected staff.
 
 **Standing: Met.** Socket.IO with rooms derived from live memberships, never
-from client request. See [SocketIOEvents.md](SocketIOEvents.md). Two declared
-events are never emitted — gap 30.
+from client request. See [SocketIOEvents.md](SocketIOEvents.md). Every declared
+event has a producer; the two that did not now fire from the booking and
+lifecycle services alongside their webhook counterparts.
 
 ### J. Analytics
 
 Aggregations over real appointment rows, and exportable reports.
 
-**Standing: Met, with one wrong denominator.** Every figure is a live query;
-there is no rollup table. Utilisation excludes leave and holidays from its
-denominator, which [Analytics.md](Analytics.md) claims it includes — gap 31.
+**Standing: Met.** Every figure is a live query; there is no rollup table, so a
+number on the dashboard is the number in the table. The denominators are
+documented figure by figure in [Analytics.md](Analytics.md) and match the SQL —
+`noShowRate` divides by completed plus no-shows, which is the set of
+appointments that should have been attended, rather than by every booking.
 
 ---
 
@@ -154,10 +170,12 @@ Permissions are resolved per request from the membership, its role and any
 per-member overrides. A grant is never carried in a token, so revocation is
 immediate.
 
-**Standing: Partial.** The four workspace roles are fully specified and enforced,
-and the platform admin surface is complete. Two gaps: no route can create a
-membership, so three of the four are unreachable (gap 01); and Customer is not an
-identity the system can authenticate (gap 02).
+**Standing: Met.** The four workspace roles are fully specified, enforced and
+reachable — invitation, acceptance and role changes all have routes, and
+`roles.spec.ts` drives each role through the browser. Customer is an identity in
+its own right on `/api/v1/me`. The platform admin surface is complete and sits
+on its own router, behind `requirePlatformAdmin` and never behind
+`requireTenant`.
 
 ---
 
@@ -169,8 +187,11 @@ request for another tenant's resource answers **404, not 403**, so the API canno
 be used to enumerate what exists.
 
 **Standing: Met.** See [MultiTenancy.md](MultiTenancy.md). Enforced in one
-middleware, verified by integration and end-to-end tests. Cross-tenant _writes_
-are not yet covered by a test — gap 39.
+middleware and verified by integration and end-to-end tests, reads and writes
+alike: `tenancy.test.ts` runs cross-tenant PATCH, PUT and DELETE against every
+entity, re-reads each row to prove it did not change, and includes a control
+that performs the same calls as the legitimate owner — without which a mistyped
+path would let the whole block pass having tested nothing.
 
 ---
 
@@ -232,25 +253,25 @@ staff receive a real-time update → confirmation and reminders processed →
 customer reschedules or cancels → business sees analytics and audit trail
 ```
 
-**Standing: three links broken.**
+**Standing: every link closed.**
 
-| Step                                                   | Standing                                                                                          |
-| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
-| Register → create workspace                            | Met                                                                                               |
-| Configure services, availability, locations, resources | Met                                                                                               |
-| **Add staff**                                          | **Gap 01** — no API can add a member; requires manual database editing                            |
-| Publish booking link → customer books                  | Met                                                                                               |
-| Appointment safely persisted                           | Met                                                                                               |
-| Real-time update                                       | Met                                                                                               |
-| Confirmation and reminders processed                   | Met                                                                                               |
-| Customer reschedules or cancels                        | Met — but as a guest via an opaque link, not as an authenticated customer (gap 02)                |
-| Business sees analytics                                | Met                                                                                               |
-| **Business sees audit trail**                          | **Gap 03** — audit rows are written by eighteen services and readable only by a platform operator |
+| Step                                                   | Standing                                                                                     |
+| ------------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| Register → create workspace                            | Met                                                                                          |
+| Configure services, availability, locations, resources | Met                                                                                          |
+| Add staff                                              | Met — invite, accept, then a staff profile; `roles.spec.ts` walks it in a browser            |
+| Publish booking link → customer books                  | Met                                                                                          |
+| Appointment safely persisted                           | Met                                                                                          |
+| Real-time update                                       | Met                                                                                          |
+| Confirmation and reminders processed                   | Met                                                                                          |
+| Customer reschedules or cancels                        | Met — as a guest through an opaque link, and as an authenticated customer on `/api/v1/me`    |
+| Business sees analytics                                | Met                                                                                          |
+| Business sees audit trail                              | Met — `/api/v1/audit-logs` is on the management router and the workspace reads its own trail |
 
-Until gaps 01 and 03 close, the product does not meet its own definition of
-success. Both are tracked, neither is disguised, and the honest reading is that
-the scheduling core is production-grade while the surrounding operating layer is
-not yet complete.
+The chain runs end to end, and `e2e/tests/` walks most of it through a browser
+rather than asserting it here. What remains unbuilt is listed in section 8 and
+in the README, and none of it sits on this path: the workflow automation engine,
+SMS delivery, calendar sync and payments are all beside it rather than in it.
 
 ---
 
@@ -258,13 +279,13 @@ not yet complete.
 
 Listed so that absence is never mistaken for oversight.
 
-|                                | Why                                                                                                                                                  |
-| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| SMS delivery                   | Channel modelled; no provider integrated. Rows close as cancelled with a reason rather than reporting success.                                       |
-| Google Calendar / Outlook sync | Declined in ADR-0009: an empty adapter that syncs nothing is worse than an honest absence.                                                           |
-| Payments and invoicing         | Out of scope for this revision.                                                                                                                      |
-| Workflow automation engine     | Models and queue reserved; no producer or processor.                                                                                                 |
-| Response schemas in OpenAPI    | Request schemas are generated from zod; response shapes are documented in `client/src/types/api.ts` instead. The cost is real and tracked as gap 42. |
+|                                | Why                                                                                                                                              |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| SMS delivery                   | Channel modelled; no provider integrated. Rows close as cancelled with a reason rather than reporting success.                                   |
+| Google Calendar / Outlook sync | Declined in ADR-0009: an empty adapter that syncs nothing is worse than an honest absence.                                                       |
+| Payments and invoicing         | Out of scope for this revision.                                                                                                                  |
+| Workflow automation engine     | Models and queue reserved; no producer or processor.                                                                                             |
+| Response schemas in OpenAPI    | Now generated: `server/src/docs/responses.ts` names 97 response schemas and every operation references one, returns 204, or declares `text/csv`. |
 
 ---
 
