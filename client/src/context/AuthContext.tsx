@@ -33,6 +33,8 @@ interface AuthContextValue {
   status: AuthStatus;
   user: MeResponse['user'] | null;
   memberships: Membership[];
+  /** Workspaces holding a customer record for this account. See ProtectedRoute. */
+  customerProfiles: number;
   /** The membership matching `activeBusinessId`, or null before one is chosen. */
   activeMembership: Membership | null;
   activeBusinessId: string | null;
@@ -259,6 +261,7 @@ export function AuthProvider({ children }: { children: ReactNode }): JSX.Element
       status,
       user: identityQuery.data?.me.user ?? null,
       memberships,
+      customerProfiles: identityQuery.data?.me.customerProfiles ?? 0,
       activeMembership,
       activeBusinessId,
       activeTimezone: activeMembership?.timezone ?? 'UTC',

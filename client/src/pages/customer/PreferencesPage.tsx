@@ -1,4 +1,26 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+/**
+ * How the businesses a person books with are allowed to contact them.
+ *
+ * Reads and writes `/me/preferences`, which is one set of switches applied to
+ * every workspace that holds a record of them at once. That is the server's
+ * decision and it shapes this page: the request may not name a workspace — the
+ * portal never accepts one — and somebody who no longer wants reminder emails
+ * wants them to stop, not to be switched off four times.
+ *
+ * The cost of that choice is `divergent`, and the page reports it rather than
+ * hiding it. Staff can still edit these same fields from a workspace's address
+ * book, so the four records can disagree. When they do there is no honest single
+ * value to show; the server hands back the conservative reading and this page
+ * says the settings currently differ instead of presenting one business's answer
+ * as though it were universal.
+ *
+ * The old version of this page also edited a phone number and a timezone
+ * through `PATCH /customers/:id`, which needed `customers:manage` — a permission
+ * a customer does not hold, so the controls rendered disabled for exactly the
+ * people they were built for. Those two fields belong to each workspace's own
+ * record and are not part of this contract, so they are gone rather than
+ * present-and-broken, and the page says where they live.
+ */
 import { Bell, Info, Lock } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { PageHeader } from '@/components/layout/PageHeader';
@@ -8,197 +30,184 @@ import {
   CardBody,
   CardHeader,
   Checkbox,
-  Field,
-  Input,
-  Select,
+  ErrorState,
+  Skeleton,
   Switch,
   useToast,
 } from '@/components/ui';
-import { useAuth } from '@/context/AuthContext';
-import { ApiError, api } from '@/lib/apiClient';
+import { isApiError } from '@/lib/apiClient';
 import { formatDuration } from '@/lib/format';
-import { PERMISSIONS } from '@/lib/permissions';
-import { timezoneOptions } from '@/lib/timezones';
-import type { BusinessSettings } from '@/types/api';
 import { FormBanner } from '@/pages/auth/FormBanner';
-import type { CustomerRecord } from './api';
-import { CustomerRecordState } from './CustomerRecordState';
-import { useMyCustomer } from './useMyCustomer';
+import {
+  usePortalPreferences,
+  useUpdatePortalPreferences,
+  type PortalPreferences,
+} from './portalApi';
 
 /**
- * The reminder points a customer may choose from.
+ * The reminder points on offer.
  *
- * Deliberately a short list of round numbers rather than a free minute field:
- * the API accepts any positive integer, but a reminder at 97 minutes is a
- * setting nobody wants and everybody mis-types.
+ * A short list of round numbers rather than a free minute field: the API accepts
+ * any positive integer up to thirty days, but a reminder at 97 minutes is a
+ * setting nobody wants and everybody mistypes.
  */
 const REMINDER_CHOICES = [1440, 720, 240, 120, 60, 30];
-
-interface Draft {
-  timezone: string;
-  phone: string;
-  emailEnabled: boolean;
-  smsEnabled: boolean;
-  marketingOptIn: boolean;
-  /** null means "follow the workspace's own schedule", which is the default. */
-  reminderOffsetsMinutes: number[] | null;
-}
-
-function toDraft(customer: CustomerRecord, fallbackZone: string): Draft {
-  const preferences = customer.communicationPreferences;
-  return {
-    timezone: customer.timezone ?? fallbackZone,
-    phone: customer.phone ?? '',
-    emailEnabled: preferences.emailEnabled,
-    smsEnabled: preferences.smsEnabled,
-    marketingOptIn: preferences.marketingOptIn,
-    reminderOffsetsMinutes: preferences.reminderOffsetsMinutes ?? null,
-  };
-}
 
 function sameOffsets(a: number[] | null, b: number[] | null): boolean {
   if (a === null || b === null) return a === b;
   return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
+function samePreferences(a: PortalPreferences, b: PortalPreferences): boolean {
+  return (
+    a.emailEnabled === b.emailEnabled &&
+    a.smsEnabled === b.smsEnabled &&
+    a.marketingOptIn === b.marketingOptIn &&
+    sameOffsets(a.reminderOffsetsMinutes, b.reminderOffsetsMinutes)
+  );
+}
+
 export default function PreferencesPage(): JSX.Element {
-  const { activeBusinessId, activeTimezone, activeMembership, can } = useAuth();
-  const { state, customer, refetch } = useMyCustomer();
-  const queryClient = useQueryClient();
+  const preferencesQuery = usePortalPreferences();
+  const update = useUpdatePortalPreferences();
   const { toast } = useToast();
 
-  const mayEdit = can(PERMISSIONS.CUSTOMERS_MANAGE);
-  /** Null until the reader touches something — the stored record shows through. */
-  const [edits, setEdits] = useState<Draft | null>(null);
+  /** Null until the reader touches something — the stored values show through. */
+  const [edits, setEdits] = useState<PortalPreferences | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  const serverDraft = useMemo(
-    () => (customer ? toDraft(customer, activeTimezone) : null),
-    [customer, activeTimezone],
-  );
+  const stored = preferencesQuery.data?.preferences ?? null;
 
   /*
-   * A fresh record from the server discards an in-progress draft.
+   * A fresh answer from the server discards an in-progress draft.
    *
-   * `customer` keeps its identity across a refetch that returns the same bytes
-   * — TanStack Query's structural sharing sees to that — so this fires when the
-   * stored record genuinely changed, not every time the window regains focus.
+   * `stored` keeps its identity across a refetch that returns the same bytes —
+   * TanStack Query's structural sharing sees to that — so this fires when the
+   * stored values genuinely changed, not every time the window regains focus.
    */
-  useEffect(() => setEdits(null), [serverDraft]);
+  useEffect(() => setEdits(null), [stored]);
 
-  // The workspace's own reminder schedule, shown as the effective one whenever
-  // the customer has not overridden it. Never invented — if this read fails the
-  // page says the schedule is unknown rather than guessing at it.
-  const settingsQuery = useQuery({
-    queryKey: ['workspace', 'settings', activeBusinessId],
-    queryFn: () => api.get<BusinessSettings>('/workspace/settings'),
-    staleTime: 10 * 60_000,
-  });
+  const zoneNote = useMemo(
+    () => 'Booking confirmations, changes and cancellations always go out; these control the rest.',
+    [],
+  );
 
-  const customerId = customer?.id ?? '';
-
-  const mutation = useMutation({
-    mutationFn: (body: Record<string, unknown>) =>
-      api.patch<CustomerRecord>(`/customers/${customerId}`, body),
-    onSuccess: () => {
-      setSaveError(null);
-      toast({ title: 'Preferences saved', tone: 'success' });
-      void queryClient.invalidateQueries({ queryKey: ['customer', 'record'] });
-    },
-    onError: (error: unknown) => {
-      setSaveError(
-        error instanceof ApiError
-          ? [error.message, ...error.details.map((detail) => detail.message)].join(' ')
-          : 'We could not save that. Please try again.',
-      );
-    },
-  });
-
-  const zones = useMemo(() => timezoneOptions(), []);
-
-  if (state.status !== 'ready' || serverDraft === null) {
+  if (preferencesQuery.isPending) {
     return (
       <>
-        <PageHeader
-          title="Preferences"
-          description="How this workspace reaches you, and the clock your bookings are shown in."
-        />
-        <CustomerRecordState
-          state={state.status === 'ready' ? { status: 'loading' } : state}
-          onRetry={refetch}
-        />
+        <PageHeader title="Preferences" description={zoneNote} />
+        <Card>
+          <CardBody className="flex flex-col gap-3">
+            <Skeleton className="h-6 w-48" />
+            <Skeleton className="h-4 w-full" />
+            <Skeleton className="h-24 w-full" />
+          </CardBody>
+        </Card>
       </>
     );
   }
 
-  const draft = edits ?? serverDraft;
-  const workspaceOffsets = settingsQuery.data?.reminderOffsetsMinutes ?? null;
-  const effectiveOffsets = draft.reminderOffsetsMinutes ?? workspaceOffsets;
+  if (preferencesQuery.isError || !preferencesQuery.data || stored === null) {
+    return (
+      <>
+        <PageHeader title="Preferences" description={zoneNote} />
+        <Card>
+          <ErrorState
+            error={preferencesQuery.error}
+            title="We could not load your preferences"
+            onRetry={() => void preferencesQuery.refetch()}
+          />
+        </Card>
+      </>
+    );
+  }
 
-  const dirty =
-    draft.timezone !== serverDraft.timezone ||
-    draft.phone !== serverDraft.phone ||
-    draft.emailEnabled !== serverDraft.emailEnabled ||
-    draft.smsEnabled !== serverDraft.smsEnabled ||
-    draft.marketingOptIn !== serverDraft.marketingOptIn ||
-    !sameOffsets(draft.reminderOffsetsMinutes, serverDraft.reminderOffsetsMinutes);
+  const { divergent, workspaceCount } = preferencesQuery.data;
+  const draft = edits ?? stored;
+  const dirty = !samePreferences(draft, stored);
 
-  const update = (patch: Partial<Draft>): void =>
-    setEdits((current) => ({ ...(current ?? serverDraft), ...patch }));
+  // No linked workspace means there is nowhere to store any of this: the server
+  // answers 409 rather than pretending to save, and a switch that sprang back on
+  // the next load would be a lie the reader has no way to detect.
+  const nowhereToStore = workspaceCount === 0;
+
+  const change = (patch: Partial<PortalPreferences>): void =>
+    setEdits((current) => ({ ...(current ?? stored), ...patch }));
 
   const toggleOffset = (minutes: number): void => {
-    const current = draft.reminderOffsetsMinutes ?? workspaceOffsets ?? [];
+    const current = draft.reminderOffsetsMinutes ?? [];
     const next = current.includes(minutes)
       ? current.filter((value) => value !== minutes)
       : [...current, minutes].sort((a, b) => b - a);
-    update({ reminderOffsetsMinutes: next });
+    change({ reminderOffsetsMinutes: next });
   };
 
   const onSave = (): void => {
-    const body: Record<string, unknown> = {};
-    const preferences: Record<string, unknown> = {};
-
-    if (draft.timezone !== serverDraft.timezone) body.timezone = draft.timezone;
-    if (draft.phone !== serverDraft.phone)
-      body.phone = draft.phone.trim() === '' ? null : draft.phone.trim();
-    if (draft.emailEnabled !== serverDraft.emailEnabled)
-      preferences.emailEnabled = draft.emailEnabled;
-    if (draft.smsEnabled !== serverDraft.smsEnabled) preferences.smsEnabled = draft.smsEnabled;
-    if (draft.marketingOptIn !== serverDraft.marketingOptIn) {
-      preferences.marketingOptIn = draft.marketingOptIn;
+    // Only what actually moved. The server merges this patch over what is
+    // stored, so sending an untouched field would overwrite whatever a workspace
+    // last set on it.
+    const patch: Partial<PortalPreferences> = {};
+    if (draft.emailEnabled !== stored.emailEnabled) patch.emailEnabled = draft.emailEnabled;
+    if (draft.smsEnabled !== stored.smsEnabled) patch.smsEnabled = draft.smsEnabled;
+    if (draft.marketingOptIn !== stored.marketingOptIn) {
+      patch.marketingOptIn = draft.marketingOptIn;
     }
-    if (
-      draft.reminderOffsetsMinutes !== null &&
-      !sameOffsets(draft.reminderOffsetsMinutes, serverDraft.reminderOffsetsMinutes)
-    ) {
-      preferences.reminderOffsetsMinutes = draft.reminderOffsetsMinutes;
+    if (!sameOffsets(draft.reminderOffsetsMinutes, stored.reminderOffsetsMinutes)) {
+      patch.reminderOffsetsMinutes = draft.reminderOffsetsMinutes;
     }
-
-    if (Object.keys(preferences).length > 0) body.communicationPreferences = preferences;
-    if (Object.keys(body).length === 0) return;
+    if (Object.keys(patch).length === 0) return;
 
     setSaveError(null);
-    mutation.mutate(body);
+    update.mutate(patch, {
+      onSuccess: () => {
+        setEdits(null);
+        toast({ title: 'Preferences saved', tone: 'success' });
+      },
+      onError: (error: unknown) => {
+        setSaveError(
+          isApiError(error) ? error.message : 'We could not save that. Please try again.',
+        );
+      },
+    });
   };
 
-  const workspaceName = activeMembership?.businessName ?? 'This workspace';
+  const businessesPhrase =
+    workspaceCount === 1
+      ? 'the business you book with'
+      : `all ${workspaceCount} businesses you book with`;
 
   return (
     <>
       <PageHeader
         title="Preferences"
-        description={`How ${workspaceName} reaches you, and the clock your bookings are shown in.`}
+        description={nowhereToStore ? zoneNote : `These apply to ${businessesPhrase}. ${zoneNote}`}
       />
 
-      {!mayEdit ? (
+      {nowhereToStore ? (
         <div
           role="status"
           className="flex items-start gap-2.5 rounded-md border border-border bg-surface-sunken px-3.5 py-3 text-sm text-fg-secondary"
         >
           <Lock className="mt-0.5 size-4 shrink-0 text-fg-muted" aria-hidden="true" />
           <p className="leading-relaxed">
-            These are your settings as {workspaceName} holds them. Your role cannot change customer
-            records here, so everything below is read-only — ask them to update it for you.
+            There is nowhere to store these yet. Contact preferences are kept against your record
+            with each business, and you have no record with any of them so far — book once and this
+            page starts working.
+          </p>
+        </div>
+      ) : null}
+
+      {divergent ? (
+        <div
+          role="status"
+          className="flex items-start gap-2.5 rounded-md border border-warning-border bg-warning-subtle px-3.5 py-3 text-sm text-warning-text"
+        >
+          <Info className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+          <p className="leading-relaxed">
+            These settings currently differ between the businesses you book with — staff can change
+            them from their own side. What is shown below is the cautious reading of the lot: a
+            switch is only on here when it is on everywhere. Saving applies your choice to all of
+            them.
           </p>
         </div>
       ) : null}
@@ -208,74 +217,34 @@ export default function PreferencesPage(): JSX.Element {
       <Card>
         <CardHeader
           as="h2"
-          title="Your clock"
-          description="Every time you see across MeetFlow is converted into this zone."
-        />
-        <CardBody className="flex flex-col gap-4">
-          <Field
-            label="Timezone"
-            hint="Reminders are timed against your calendar day, so this needs to be a real place rather than an offset."
-          >
-            {(fieldProps) => (
-              <Select
-                {...fieldProps}
-                options={zones}
-                value={draft.timezone}
-                disabled={!mayEdit}
-                onChange={(event) => update({ timezone: event.target.value })}
-              />
-            )}
-          </Field>
-        </CardBody>
-      </Card>
-
-      <Card>
-        <CardHeader
-          as="h2"
           title="How they reach you"
-          description="Booking confirmations, changes and cancellations always go out; these control the rest."
+          description="Confirmations for a booking are always sent. These cover everything else."
         />
         <CardBody className="flex flex-col gap-5">
           <Switch
             checked={draft.emailEnabled}
-            onCheckedChange={(checked) => update({ emailEnabled: checked })}
-            disabled={!mayEdit}
+            onCheckedChange={(checked) => change({ emailEnabled: checked })}
+            disabled={nowhereToStore}
             label="Email"
-            description={`Sent to ${state.customer.email ?? 'your address'}.`}
+            description="Reminders and updates about your bookings."
           />
 
           <Switch
             checked={draft.smsEnabled}
-            onCheckedChange={(checked) => update({ smsEnabled: checked })}
-            disabled={!mayEdit || draft.phone.trim() === ''}
+            onCheckedChange={(checked) => change({ smsEnabled: checked })}
+            disabled={nowhereToStore}
             label="Text message"
-            description={
-              draft.phone.trim() === ''
-                ? 'Add a mobile number below to turn this on.'
-                : `Sent to ${draft.phone}.`
-            }
+            // Honest about the dependency: the number is not editable from here,
+            // so promising texts without one would be a switch that does nothing.
+            description="Only sent where the business holds a mobile number for you. Ask them to add or change it."
           />
-
-          <Field label="Mobile number" hint="Used only for booking messages.">
-            {(fieldProps) => (
-              <Input
-                {...fieldProps}
-                type="tel"
-                autoComplete="tel"
-                value={draft.phone}
-                disabled={!mayEdit}
-                placeholder="+91 98450 10001"
-                onChange={(event) => update({ phone: event.target.value })}
-              />
-            )}
-          </Field>
 
           <Switch
             checked={draft.marketingOptIn}
-            onCheckedChange={(checked) => update({ marketingOptIn: checked })}
-            disabled={!mayEdit}
+            onCheckedChange={(checked) => change({ marketingOptIn: checked })}
+            disabled={nowhereToStore}
             label="News and offers"
-            description={`Occasional messages from ${workspaceName} that are not about a specific booking.`}
+            description="Occasional messages that are not about a specific booking."
           />
         </CardBody>
       </Card>
@@ -290,33 +259,30 @@ export default function PreferencesPage(): JSX.Element {
           <p className="flex items-start gap-2 rounded-md bg-surface-sunken px-3.5 py-2.5 text-sm leading-relaxed text-fg-secondary">
             <Info className="mt-0.5 size-4 shrink-0 text-fg-muted" aria-hidden="true" />
             {draft.reminderOffsetsMinutes === null ? (
-              workspaceOffsets === null ? (
-                <span>
-                  You are following {workspaceName}’s own reminder schedule. We could not read what
-                  that schedule is, so nothing is shown here rather than a guess.
-                </span>
-              ) : (
-                <span>
-                  You are following {workspaceName}’s schedule:{' '}
-                  {workspaceOffsets.map((value) => formatDuration(value)).join(' and ')} before.
-                  Choosing below replaces it with your own.
-                </span>
-              )
+              // Deliberately does not list the schedules being followed. Each
+              // business sets its own and the portal cannot read them, and a
+              // plausible-looking guess would be worse than saying nothing.
+              <span>
+                You are following each business&rsquo;s own reminder schedule. Those schedules are
+                theirs to set, so they are not listed here. Choosing below replaces them with yours,
+                everywhere.
+              </span>
             ) : (
               <span>
-                You have your own schedule. Clearing every option below means no reminders at all.
+                You have your own schedule, and it applies wherever you book. Clearing every option
+                below means no reminders at all.
               </span>
             )}
           </p>
 
-          <fieldset className="flex flex-col gap-3" disabled={!mayEdit}>
+          <fieldset className="flex flex-col gap-3" disabled={nowhereToStore}>
             <legend className="mf-sr-only">Reminder times</legend>
             <div className="grid gap-3 sm:grid-cols-2">
               {REMINDER_CHOICES.map((minutes) => (
                 <Checkbox
                   key={minutes}
                   label={`${formatDuration(minutes)} before`}
-                  checked={effectiveOffsets?.includes(minutes) ?? false}
+                  checked={draft.reminderOffsetsMinutes?.includes(minutes) ?? false}
                   onChange={() => toggleOffset(minutes)}
                 />
               ))}
@@ -327,9 +293,9 @@ export default function PreferencesPage(): JSX.Element {
                   variant="ghost"
                   size="sm"
                   leadingIcon={<Bell className="size-4" aria-hidden="true" />}
-                  onClick={() => update({ reminderOffsetsMinutes: null })}
+                  onClick={() => change({ reminderOffsetsMinutes: null })}
                 >
-                  Go back to the workspace schedule
+                  Go back to each business&rsquo;s own schedule
                 </Button>
               </div>
             ) : null}
@@ -337,9 +303,9 @@ export default function PreferencesPage(): JSX.Element {
         </CardBody>
       </Card>
 
-      {mayEdit ? (
-        // One save bar for the whole page: the three cards are one record, and
-        // a button per card would imply three separate requests.
+      {!nowhereToStore ? (
+        // One save bar for the whole page: these are one record, and a button
+        // per card would imply separate requests that could half-succeed.
         <div className="sticky bottom-0 z-10 -mx-4 flex flex-wrap items-center gap-2 border-t border-border bg-surface/95 px-4 py-3 backdrop-blur sm:-mx-6 sm:px-6">
           <p className="mr-auto text-sm text-fg-muted" aria-live="polite">
             {dirty ? 'You have unsaved changes' : 'Everything is saved'}
@@ -347,7 +313,7 @@ export default function PreferencesPage(): JSX.Element {
           <Button variant="secondary" onClick={() => setEdits(null)} disabled={!dirty}>
             Discard
           </Button>
-          <Button onClick={onSave} loading={mutation.isPending} disabled={!dirty}>
+          <Button onClick={onSave} loading={update.isPending} disabled={!dirty}>
             Save preferences
           </Button>
         </div>

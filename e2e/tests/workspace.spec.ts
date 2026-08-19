@@ -60,11 +60,20 @@ test.afterAll(async () => {
   await page.close();
 });
 
-/** The sidebar is the only navigation an owner has, so the specs use it. */
+/**
+ * The sidebar is the only navigation an owner has, so the specs use it.
+ *
+ * `exact` on the link, because accessible names nest: "Services" is a substring
+ * of "My services", and a loose match resolves to both the moment a personal
+ * counterpart is added to a section. The heading below wants `level: 1` for the
+ * mirror-image reason — an empty state's own heading ("No locations yet")
+ * carries the same words as the page title.
+ */
 async function navigateTo(target: string): Promise<void> {
-  await page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: target }).click();
-  // Level 1 specifically: an empty state's own heading ("No locations yet")
-  // otherwise matches the same name and trips strict mode.
+  await page
+    .getByRole('navigation', { name: 'Main' })
+    .getByRole('link', { name: target, exact: true })
+    .click();
   await expect(page.getByRole('heading', { level: 1, name: target })).toBeVisible();
 }
 

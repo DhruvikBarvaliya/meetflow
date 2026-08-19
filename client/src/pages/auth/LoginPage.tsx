@@ -135,6 +135,20 @@ export default function LoginPage(): JSX.Element {
           )}
         </Field>
 
+        {/* Beside the field it belongs to rather than under the submit button:
+            somebody who cannot get past this input should not have to fail a
+            sign-in first to discover that recovery exists. It sits outside the
+            Field so it is a sibling of the input rather than part of the
+            description a screen reader reads out with it. */}
+        <p className="-mt-1 text-right text-sm">
+          <Link
+            to="/forgot-password"
+            className="font-medium text-brand-text underline-offset-4 hover:underline"
+          >
+            Forgot your password?
+          </Link>
+        </p>
+
         <Button type="submit" loading={isSubmitting} fullWidth size="lg" className="mt-1">
           {isSubmitting ? 'Signing in…' : 'Sign in'}
         </Button>

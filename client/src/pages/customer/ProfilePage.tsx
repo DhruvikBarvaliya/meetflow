@@ -1,6 +1,34 @@
+/**
+ * The account behind the bookings: who you are, who knows you, and the security
+ * of both.
+ *
+ * Deliberately shell-agnostic. It renders only a page body, reads its data from
+ * `/me/profile` and `useAuth()`, and reaches neither for a workspace header nor
+ * for a permission — so the same component is correct inside `PortalShell` for
+ * somebody who holds no membership anywhere, and inside `AppShell` for a member
+ * who wants to change their password. Splitting it in two would give the product
+ * two "change your password" screens that had to be kept in step.
+ *
+ * The two lists on it are genuinely different things and are not merged:
+ * `workspaces` from `/me/profile` are the businesses that hold a customer record
+ * for this person, and `memberships` from `useAuth()` are the workspaces this
+ * account can sign in to and work in. One person can appear in both — a
+ * therapist who is also somebody else's client — and collapsing them would say
+ * they had access to a business whose waiting room they have merely sat in.
+ */
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useMutation } from '@tanstack/react-query';
-import { Building2, Eye, EyeOff, KeyRound, LogOut, ShieldCheck } from 'lucide-react';
+import {
+  Building2,
+  Eye,
+  EyeOff,
+  KeyRound,
+  LogOut,
+  MailCheck,
+  MailWarning,
+  ShieldCheck,
+  Store,
+} from 'lucide-react';
 import { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { Link, useNavigate } from 'react-router-dom';
@@ -14,24 +42,26 @@ import {
   CardFooter,
   CardHeader,
   ConfirmDialog,
+  ErrorState,
   Field,
   Input,
+  Skeleton,
   useToast,
 } from '@/components/ui';
 import { useAuth } from '@/context/AuthContext';
-import { ApiError, api } from '@/lib/apiClient';
-import { humanizeEnum } from '@/lib/format';
+import { api, isApiError } from '@/lib/apiClient';
+import { customerName, formatDate, humanizeEnum } from '@/lib/format';
 import { SYSTEM_ROLE_LABELS, isSystemRoleKey } from '@/lib/permissions';
 import { FormBanner } from '@/pages/auth/FormBanner';
 import { PasswordChecklist } from '@/pages/auth/PasswordChecklist';
 import { passwordSchema } from '@/pages/auth/passwordSchema';
 import { useFormApiError } from '@/pages/auth/useFormApiError';
-import { useMyCustomer } from './useMyCustomer';
+import { usePortalProfile } from './portalApi';
 
 const changePasswordSchema = z
   .object({
-    // Deliberately not the full policy: an existing password may pre-date a
-    // rule change, and refusing to submit it would be a dead end.
+    // Deliberately not the full policy: an existing password may pre-date a rule
+    // change, and refusing to submit it would be a dead end.
     currentPassword: z.string().min(1, 'Enter your current password.'),
     newPassword: passwordSchema,
     confirmPassword: z.string().min(1, 'Type the new password again.'),
@@ -57,9 +87,18 @@ function roleLabel(roleKey: string, fallback: string): string {
   return isSystemRoleKey(roleKey) ? SYSTEM_ROLE_LABELS[roleKey] : fallback;
 }
 
+function DetailRow({ label, value }: { label: string; value: string }): JSX.Element {
+  return (
+    <div className="flex flex-col gap-0.5">
+      <dt className="text-xs font-medium uppercase tracking-wide text-fg-muted">{label}</dt>
+      <dd className="text-sm text-fg">{value}</dd>
+    </div>
+  );
+}
+
 export default function ProfilePage(): JSX.Element {
-  const { user, memberships, activeBusinessId, logout } = useAuth();
-  const { customer } = useMyCustomer();
+  const { memberships, activeBusinessId, logout } = useAuth();
+  const profileQuery = usePortalProfile();
   const navigate = useNavigate();
   const { toast } = useToast();
 
@@ -77,11 +116,12 @@ export default function ProfilePage(): JSX.Element {
   );
 
   const newPassword = form.watch('newPassword');
+  const account = profileQuery.data?.user ?? null;
 
   /**
-   * Changing a password revokes every refresh token the account holds — the API
-   * says so in its own response — so the only honest thing to do afterwards is
-   * end this session too and send the user back to sign in.
+   * Changing a password revokes every refresh token on the account — the server
+   * says so and does it — so the only honest thing afterwards is to end this
+   * session too and send the person back to sign in.
    */
   const onChangePassword = form.handleSubmit(async (values) => {
     clearFormError();
@@ -121,7 +161,7 @@ export default function ProfilePage(): JSX.Element {
       setSignOutAllOpen(false);
       toast({
         title: 'Could not sign out everywhere',
-        description: error instanceof ApiError ? error.message : 'Please try again in a moment.',
+        description: isApiError(error) ? error.message : 'Please try again in a moment.',
         tone: 'error',
       });
     },
@@ -130,98 +170,166 @@ export default function ProfilePage(): JSX.Element {
   return (
     <>
       <PageHeader
-        title="My profile"
-        description="Your account, the workspaces it belongs to, and the security of both."
+        title="Your account"
+        description="Your details, the businesses that hold a record of you, and the security of both."
       />
 
       {/* --- Account --------------------------------------------------------- */}
       <Card>
-        <CardHeader
-          as="h2"
-          title="Account"
-          description="Identity details the API holds against your login."
-        />
-        <CardBody>
-          <dl className="grid gap-4 sm:grid-cols-2">
-            <div className="flex flex-col gap-0.5">
-              <dt className="text-xs font-medium uppercase tracking-wide text-fg-muted">Email</dt>
-              <dd className="text-sm text-fg">{user?.email ?? '—'}</dd>
+        <CardHeader as="h2" title="Details" description="What MeetFlow holds against your login." />
+        <CardBody className="flex flex-col gap-4">
+          {profileQuery.isPending ? (
+            // A skeleton rather than a row of dashes: an em dash beside "Email"
+            // reads as "we have no email for you", which would not be true.
+            <div className="grid gap-4 sm:grid-cols-2" aria-hidden="true">
+              <Skeleton className="h-10 w-full" />
+              <Skeleton className="h-10 w-full" />
+              <Skeleton className="h-10 w-full" />
+              <Skeleton className="h-10 w-full" />
             </div>
-            <div className="flex flex-col gap-0.5">
-              <dt className="text-xs font-medium uppercase tracking-wide text-fg-muted">
-                Account type
-              </dt>
-              <dd className="text-sm text-fg">{user ? humanizeEnum(user.platformRole) : '—'}</dd>
-            </div>
-            {customer ? (
-              <>
-                <div className="flex flex-col gap-0.5">
-                  <dt className="text-xs font-medium uppercase tracking-wide text-fg-muted">
-                    Name on your bookings
-                  </dt>
-                  <dd className="text-sm text-fg">
-                    {customer.firstName} {customer.lastName}
-                  </dd>
-                </div>
-                <div className="flex flex-col gap-0.5">
-                  <dt className="text-xs font-medium uppercase tracking-wide text-fg-muted">
-                    Booking timezone
-                  </dt>
-                  <dd className="text-sm text-fg">
-                    {(customer.timezone ?? '—').replace(/_/g, ' ')}
-                  </dd>
-                </div>
-              </>
-            ) : null}
-          </dl>
-          {customer ? (
-            <p className="mt-4 text-sm text-fg-muted">
-              Your name, phone number and timezone travel with your bookings.{' '}
-              <Link
-                to="/app/preferences"
-                className="rounded-xs font-medium text-brand-text underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-              >
-                Change them in Preferences
-              </Link>
-              .
-            </p>
-          ) : null}
+          ) : profileQuery.isError || account === null ? (
+            <ErrorState
+              error={profileQuery.error}
+              title="We could not load your details"
+              onRetry={() => void profileQuery.refetch()}
+            />
+          ) : (
+            <>
+              <dl className="grid gap-4 sm:grid-cols-2">
+                <DetailRow label="Name" value={customerName(account, account.email)} />
+                <DetailRow label="Email" value={account.email} />
+                <DetailRow label="Your timezone" value={account.timezone.replace(/_/g, ' ')} />
+                <DetailRow label="Account type" value={humanizeEnum(account.platformRole)} />
+              </dl>
+
+              {account.emailVerified ? (
+                <p className="flex items-start gap-2 text-sm text-success-text">
+                  <MailCheck className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                  Your email address is confirmed, which is what lets MeetFlow gather your bookings
+                  from every business under this one account.
+                </p>
+              ) : (
+                <p className="flex items-start gap-2 text-sm text-warning-text">
+                  <MailWarning className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+                  Your email address has not been confirmed yet. Until it is, bookings you made
+                  before creating this account stay separate from it — matching on an unproven
+                  address would let anyone read your diary by typing it at sign-up. The confirmation
+                  link was sent when the account was created.
+                </p>
+              )}
+
+              <p className="text-sm text-fg-muted">
+                Your name, phone number and timezone travel with each booking and are held by the
+                business you booked with. Ask them to change either, or set how they contact you in{' '}
+                <Link
+                  to="/portal/preferences"
+                  className="rounded-xs font-medium text-brand-text underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                >
+                  Preferences
+                </Link>
+                .
+              </p>
+            </>
+          )}
         </CardBody>
       </Card>
 
-      {/* --- Workspaces ------------------------------------------------------ */}
+      {/* --- Businesses that hold a record ----------------------------------- */}
       <Card>
         <CardHeader
           as="h2"
-          title="Workspaces"
-          description="Where this account can sign in, and what it may do there."
+          title="Businesses you book with"
+          description="Everywhere your bookings are gathered from."
         />
         <CardBody>
-          <ul className="flex flex-col gap-3">
-            {memberships.map((membership) => (
-              <li
-                key={membership.membershipId}
-                className="flex flex-wrap items-center gap-3 rounded-lg border border-border px-4 py-3"
-              >
-                <Building2 className="size-4 shrink-0 text-fg-muted" aria-hidden="true" />
-                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-                  <p className="truncate text-sm font-medium text-fg">{membership.businessName}</p>
-                  <p className="text-xs text-fg-muted">
-                    {roleLabel(membership.roleKey, membership.roleName)} ·{' '}
-                    {membership.timezone.replace(/_/g, ' ')}
-                  </p>
-                </div>
-                {membership.businessId === activeBusinessId ? (
-                  <Badge tone="brand">Current</Badge>
-                ) : null}
-                <Badge tone={membership.status === 'ACTIVE' ? 'success' : 'warning'}>
-                  {humanizeEnum(membership.status)}
-                </Badge>
-              </li>
-            ))}
-          </ul>
+          {profileQuery.isPending ? (
+            <div className="flex flex-col gap-3" aria-hidden="true">
+              <Skeleton className="h-14 w-full" />
+              <Skeleton className="h-14 w-full" />
+            </div>
+          ) : profileQuery.data && profileQuery.data.workspaces.length > 0 ? (
+            <ul className="flex flex-col gap-3">
+              {profileQuery.data.workspaces.map((workspace) => (
+                <li
+                  key={workspace.customerPublicId}
+                  className="flex flex-wrap items-center gap-3 rounded-lg border border-border px-4 py-3"
+                >
+                  {workspace.business.logoUrl ? (
+                    <img
+                      src={workspace.business.logoUrl}
+                      alt=""
+                      className="size-8 shrink-0 rounded-md object-cover"
+                    />
+                  ) : (
+                    <Store className="size-4 shrink-0 text-fg-muted" aria-hidden="true" />
+                  )}
+                  <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <p className="truncate text-sm font-medium text-fg">
+                      {workspace.business.name}
+                    </p>
+                    <p className="text-xs text-fg-muted">
+                      Known to them since{' '}
+                      {formatDate(
+                        workspace.knownSince,
+                        account?.timezone ?? workspace.business.timezone,
+                      )}
+                    </p>
+                  </div>
+                  {workspace.upcomingBookings > 0 ? (
+                    <Badge tone="brand">{workspace.upcomingBookings} upcoming</Badge>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-sm text-fg-muted">
+              No business holds a customer record for this account yet. One appears here the first
+              time you book with the address above.
+            </p>
+          )}
         </CardBody>
       </Card>
+
+      {/* --- Workspaces this account works in --------------------------------
+          Rendered only when there are any. A pure customer has none, and an
+          empty "Workspaces" card would leave them wondering what they are
+          missing. */}
+      {memberships.length > 0 ? (
+        <Card>
+          <CardHeader
+            as="h2"
+            title="Workspaces you work in"
+            description="Where this account can sign in and manage a diary."
+          />
+          <CardBody>
+            <ul className="flex flex-col gap-3">
+              {memberships.map((membership) => (
+                <li
+                  key={membership.membershipId}
+                  className="flex flex-wrap items-center gap-3 rounded-lg border border-border px-4 py-3"
+                >
+                  <Building2 className="size-4 shrink-0 text-fg-muted" aria-hidden="true" />
+                  <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <p className="truncate text-sm font-medium text-fg">
+                      {membership.businessName}
+                    </p>
+                    <p className="text-xs text-fg-muted">
+                      {roleLabel(membership.roleKey, membership.roleName)} ·{' '}
+                      {membership.timezone.replace(/_/g, ' ')}
+                    </p>
+                  </div>
+                  {membership.businessId === activeBusinessId ? (
+                    <Badge tone="brand">Current</Badge>
+                  ) : null}
+                  <Badge tone={membership.status === 'ACTIVE' ? 'success' : 'warning'}>
+                    {humanizeEnum(membership.status)}
+                  </Badge>
+                </li>
+              ))}
+            </ul>
+          </CardBody>
+        </Card>
+      ) : null}
 
       {/* --- Password -------------------------------------------------------- */}
       <Card>
@@ -250,6 +358,7 @@ export default function ProfilePage(): JSX.Element {
                       type="button"
                       onClick={() => setShowCurrent((current) => !current)}
                       aria-label={showCurrent ? 'Hide current password' : 'Show current password'}
+                      aria-pressed={showCurrent}
                       className="rounded-md p-1 text-fg-muted transition-colors hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
                     >
                       {showCurrent ? (
@@ -280,6 +389,7 @@ export default function ProfilePage(): JSX.Element {
                       type="button"
                       onClick={() => setShowNew((current) => !current)}
                       aria-label={showNew ? 'Hide new password' : 'Show new password'}
+                      aria-pressed={showNew}
                       className="rounded-md p-1 text-fg-muted transition-colors hover:text-fg focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
                     >
                       {showNew ? (
@@ -307,6 +417,17 @@ export default function ProfilePage(): JSX.Element {
                 />
               )}
             </Field>
+
+            <p className="text-sm text-fg-muted">
+              Forgotten it instead?{' '}
+              <Link
+                to="/forgot-password"
+                className="rounded-xs font-medium text-brand-text underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+              >
+                Reset it by email
+              </Link>
+              .
+            </p>
           </CardBody>
           <CardFooter>
             <Button
@@ -350,7 +471,7 @@ export default function ProfilePage(): JSX.Element {
         onCancel={() => setSignOutAllOpen(false)}
         onConfirm={() => signOutEverywhere.mutate()}
         title="Sign out of every device?"
-        description="You will need to sign in again here as well as everywhere else."
+        description="You will need to sign in again here as well as everywhere else. Nothing about your bookings changes."
         confirmLabel="Sign out everywhere"
         cancelLabel="Stay signed in"
         destructive

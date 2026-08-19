@@ -9,7 +9,7 @@
 import { Op, type Transaction } from 'sequelize';
 import { createLogger } from '../../config/logger';
 import { sequelize } from '../../config/database';
-import { Business, Membership, RefreshToken, Role, User } from '../../database/models';
+import { Business, Customer, Membership, RefreshToken, Role, User } from '../../database/models';
 import {
   ConflictError,
   ErrorCode,
@@ -682,5 +682,26 @@ export async function listMemberships(userId: string): Promise<
       roleName: role.name,
       status: membership.status,
     };
+  });
+}
+
+/**
+ * How many workspaces hold a customer record for this person.
+ *
+ * `/auth/me` reports it because "this user has no membership" is ambiguous on
+ * its own: it describes a brand-new owner who has not created their workspace
+ * yet *and* a customer who will never have one. The client has to route those
+ * two people to opposite places — onboarding, or their own bookings — and
+ * guessing from the absence sent every new registrant into the customer portal.
+ *
+ * Deliberately a count rather than the records themselves. The routing decision
+ * needs only "is this person a customer anywhere", and `/auth/me` is on the
+ * critical path of every page load, so it must not become a second way to read
+ * customer data.
+ */
+export async function countCustomerProfiles(userId: string): Promise<number> {
+  return Customer.count({
+    where: { userId },
+    include: [{ model: Business, as: 'business', required: true, where: { status: 'ACTIVE' } }],
   });
 }

@@ -1,5 +1,6 @@
 import {
   Building2,
+  CalendarCheck2,
   Check,
   ChevronsUpDown,
   LogOut,
@@ -270,6 +271,26 @@ function UserMenu(): JSX.Element | null {
       <DropdownSeparator />
       <DropdownLinkItem to="/app/profile" icon={<UserCircle className="size-4" />}>
         My profile
+      </DropdownLinkItem>
+      {/*
+       * The bridge to the customer portal, and the mirror of the
+       * `My workspace` link `PortalShell` shows on the way back.
+       *
+       * Here rather than in the sidebar for the same reason as the platform
+       * link below: that list is workspace navigation, filtered by workspace
+       * permissions, and a person's own bookings are a property of the account
+       * rather than of any membership. `/app/my/bookings` and
+       * `/app/preferences` used to carry this and now redirect here.
+       *
+       * Shown unconditionally, because whether this account holds a customer
+       * record anywhere is only answerable by `GET /api/v1/me/profile` — an
+       * async call this menu has no business making just to decide whether to
+       * render one item. The portal states plainly when it finds no records,
+       * which is a better outcome than a member who books with a colleague's
+       * business having no way through at all.
+       */}
+      <DropdownLinkItem to="/portal/bookings" icon={<CalendarCheck2 className="size-4" />}>
+        My bookings
       </DropdownLinkItem>
       {/*
        * The one bridge from the tenant app to the platform surface. It is

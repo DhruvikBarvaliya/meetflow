@@ -12,6 +12,11 @@ export {
   type AppointmentDetailDrawerProps,
 } from './AppointmentDetailDrawer';
 export {
+  BookAppointmentDrawer,
+  type BookAppointmentDrawerProps,
+  type BookedAppointment,
+} from './BookAppointmentDrawer';
+export {
   EventBlock,
   MonthGrid,
   TimeGrid,

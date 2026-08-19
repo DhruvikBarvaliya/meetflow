@@ -49,7 +49,7 @@ export function ProtectedRoute({
   permission,
   mode = 'all',
 }: ProtectedRouteProps): JSX.Element {
-  const { status, memberships, canAll, canAny, activeBusinessId } = useAuth();
+  const { status, memberships, customerProfiles, canAll, canAny, activeBusinessId } = useAuth();
   const location = useLocation();
 
   if (status === 'loading') return <AuthPending />;
@@ -60,8 +60,24 @@ export function ProtectedRoute({
     return <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />;
   }
 
+  /*
+   * No membership, on a route that needs one. Where this goes depends on who
+   * the person is, and "no membership" alone does not say.
+   *
+   * It describes two people with opposite needs: someone who has just
+   * registered and is on their way to creating a workspace, and a customer who
+   * will never have one. Sending a customer to `/create-workspace` answers
+   * "where is my haircut appointment?" with an invitation to start a business.
+   * Sending a new owner to the portal drops them into an empty bookings list
+   * instead of the onboarding they came for.
+   *
+   * So the decision is made on a fact rather than on an absence:
+   * `customerProfiles` is the number of workspaces holding a customer record
+   * for this account, and it is the only thing that distinguishes the two.
+   * `/auth/me` reports it for exactly this branch.
+   */
   if (requireWorkspace && memberships.length === 0) {
-    return <Navigate to="/create-workspace" replace />;
+    return <Navigate to={customerProfiles > 0 ? '/portal' : '/create-workspace'} replace />;
   }
 
   // Memberships exist but reconciliation has not run yet; rendering now would

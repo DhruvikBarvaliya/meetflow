@@ -126,7 +126,10 @@ export const logoutAll = asyncHandler(async (req: Request, res: Response) => {
  */
 export const me = asyncHandler(async (req: Request, res: Response) => {
   if (!req.auth) throw new UnauthenticatedError();
-  const memberships = await authService.listMemberships(req.auth.userId);
+  const [memberships, customerProfiles] = await Promise.all([
+    authService.listMemberships(req.auth.userId),
+    authService.countCustomerProfiles(req.auth.userId),
+  ]);
   sendSuccess(res, {
     user: {
       id: req.auth.userId,
@@ -134,6 +137,10 @@ export const me = asyncHandler(async (req: Request, res: Response) => {
       platformRole: req.auth.platformRole,
     },
     memberships,
+    // Lets the client tell a new owner apart from a customer when neither
+    // holds a membership. Without it the only signal is an absence, and an
+    // absence routes both people to the same wrong place.
+    customerProfiles,
     activeWorkspace: req.tenant
       ? {
           businessId: req.tenant.businessId,

@@ -1,6 +1,5 @@
 import {
   BarChart3,
-  BellRing,
   CalendarDays,
   CalendarRange,
   ClipboardList,
@@ -9,13 +8,16 @@ import {
   Hourglass,
   LayoutDashboard,
   Link2,
+  ListChecks,
   MapPin,
   Package,
+  ScrollText,
   Settings,
   Sparkles,
   UserCircle,
   Users,
   UsersRound,
+  Webhook,
   type LucideIcon,
 } from 'lucide-react';
 import { PERMISSIONS, type PermissionKey } from '@/lib/permissions';
@@ -158,8 +160,28 @@ export const NAVIGATION: NavSection[] = [
         icon: CalendarRange,
         permission: [PERMISSIONS.AVAILABILITY_MANAGE_OWN],
       },
-      { label: 'My bookings', to: '/app/my/bookings', icon: ClipboardList },
-      { label: 'Preferences', to: '/app/preferences', icon: BellRing },
+      // `staff:read`, matching the route guard and the endpoint the page calls
+      // (`GET /staff/:id/services`). A provider without that grant cannot read
+      // their own roster row, so the link would lead to a refusal.
+      {
+        label: 'My services',
+        to: '/app/my/services',
+        icon: ListChecks,
+        permission: [PERMISSIONS.STAFF_READ],
+      },
+      /*
+       * `My bookings` and `Preferences` used to sit here, pointing at
+       * `/app/my/bookings` and `/app/preferences`. Both pages moved to the
+       * customer portal, which is a sibling of `/app` rather than a child of
+       * it, so neither belongs in a workspace sidebar any more: this list is
+       * filtered by workspace permissions and every entry in it keeps the
+       * reader inside this frame, whereas the portal is a different frame
+       * serving a different identity — the person, not the membership.
+       *
+       * The way there is in the account menu in `AppShell`, beside `My
+       * profile` and the platform-administration link, which is where the
+       * other cross-surface jumps live.
+       */
     ],
   },
   {
@@ -170,6 +192,23 @@ export const NAVIGATION: NavSection[] = [
         to: '/app/members',
         icon: UsersRound,
         permission: [PERMISSIONS.MEMBERS_READ],
+      },
+      // Both gate on the read grant rather than the write one, matching their
+      // routes. A Manager holds `audit:read` and `webhooks:read` and has real
+      // work to do on each page; the pages themselves gate their controls on
+      // the matching `:manage` grant, so what appears here is never a link to
+      // a screen the caller would be refused.
+      {
+        label: 'Audit log',
+        to: '/app/audit-log',
+        icon: ScrollText,
+        permission: [PERMISSIONS.AUDIT_READ],
+      },
+      {
+        label: 'Webhooks',
+        to: '/app/webhooks',
+        icon: Webhook,
+        permission: [PERMISSIONS.WEBHOOKS_READ],
       },
       {
         label: 'Settings',

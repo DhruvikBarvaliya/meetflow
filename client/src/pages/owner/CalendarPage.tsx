@@ -1,11 +1,12 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { CalendarDays, ChevronLeft, ChevronRight, TriangleAlert } from 'lucide-react';
+import { CalendarDays, CalendarPlus, ChevronLeft, ChevronRight, TriangleAlert } from 'lucide-react';
 import { DateTime } from 'luxon';
 import { useCallback, useMemo, useState } from 'react';
 import { PageHeader } from '@/components/layout';
 import {
   APPOINTMENT_EVENTS,
   AppointmentDetailDrawer,
+  BookAppointmentDrawer,
   DataState,
   FilterBar,
   FilterField,
@@ -24,6 +25,7 @@ import {
 import { Button, Card, EmptyState, Select, Skeleton, Tabs } from '@/components/ui';
 import { useAuth } from '@/context/AuthContext';
 import { api } from '@/lib/apiClient';
+import { PERMISSIONS } from '@/lib/permissions';
 import type { ApiSuccess } from '@/types/api';
 
 type CalendarView = 'day' | 'week' | 'month';
@@ -40,7 +42,7 @@ type CalendarView = 'day' | 'week' | 'month';
  * looking is in another country.
  */
 export default function CalendarPage(): JSX.Element {
-  const { activeBusinessId, activeTimezone } = useAuth();
+  const { activeBusinessId, activeTimezone, can } = useAuth();
   const queryClient = useQueryClient();
   const staff = useStaffLookup();
   const services = useServicesLookup();
@@ -54,6 +56,9 @@ export default function CalendarPage(): JSX.Element {
   const [serviceFilter, setServiceFilter] = useState('');
   const [locationFilter, setLocationFilter] = useState('');
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [booking, setBooking] = useState(false);
+
+  const canBook = can(PERMISSIONS.APPOINTMENTS_CREATE);
 
   const anchor = useMemo(
     () => DateTime.fromISO(anchorIso, { zone: activeTimezone }).startOf('day'),
@@ -134,34 +139,44 @@ export default function CalendarPage(): JSX.Element {
         title="Calendar"
         description={`Shown in ${activeTimezone}, the workspace clock.`}
         actions={
-          <div className="flex items-center gap-1">
-            <Button
-              variant="secondary"
-              size="icon"
-              className="size-9"
-              aria-label={`Previous ${view}`}
-              onClick={() => step(-1)}
-            >
-              <ChevronLeft className="size-4" aria-hidden="true" />
-            </Button>
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() =>
-                setAnchorIso(DateTime.now().setZone(activeTimezone).toISODate() ?? anchorIso)
-              }
-            >
-              Today
-            </Button>
-            <Button
-              variant="secondary"
-              size="icon"
-              className="size-9"
-              aria-label={`Next ${view}`}
-              onClick={() => step(1)}
-            >
-              <ChevronRight className="size-4" aria-hidden="true" />
-            </Button>
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-1">
+              <Button
+                variant="secondary"
+                size="icon"
+                className="size-9"
+                aria-label={`Previous ${view}`}
+                onClick={() => step(-1)}
+              >
+                <ChevronLeft className="size-4" aria-hidden="true" />
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() =>
+                  setAnchorIso(DateTime.now().setZone(activeTimezone).toISODate() ?? anchorIso)
+                }
+              >
+                Today
+              </Button>
+              <Button
+                variant="secondary"
+                size="icon"
+                className="size-9"
+                aria-label={`Next ${view}`}
+                onClick={() => step(1)}
+              >
+                <ChevronRight className="size-4" aria-hidden="true" />
+              </Button>
+            </div>
+            {canBook ? (
+              <Button
+                onClick={() => setBooking(true)}
+                leadingIcon={<CalendarPlus className="size-4" aria-hidden="true" />}
+              >
+                Take a booking
+              </Button>
+            ) : null}
           </div>
         }
       >
@@ -274,6 +289,13 @@ export default function CalendarPage(): JSX.Element {
                   >
                     Clear filters
                   </Button>
+                ) : canBook ? (
+                  <Button
+                    onClick={() => setBooking(true)}
+                    leadingIcon={<CalendarPlus className="size-4" aria-hidden="true" />}
+                  >
+                    Take a booking
+                  </Button>
                 ) : null
               }
             />
@@ -302,6 +324,23 @@ export default function CalendarPage(): JSX.Element {
         appointmentId={selectedId}
         open={selectedId !== null}
         onClose={() => setSelectedId(null)}
+      />
+
+      {/*
+       * The drawer opens on the day and provider the calendar is already
+       * showing. In the month view `anchor` is a day inside the month rather
+       * than a day anybody chose, so it is still the most useful starting point
+       * — and the picker is a date control, not a fixed one.
+       */}
+      <BookAppointmentDrawer
+        open={booking}
+        onClose={() => setBooking(false)}
+        initialDate={anchor.toISODate()}
+        initialStaffProfileId={staffFilter === '' ? null : staffFilter}
+        onBooked={(appointment) => {
+          refresh();
+          setSelectedId(appointment.id);
+        }}
       />
     </>
   );

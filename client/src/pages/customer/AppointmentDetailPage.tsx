@@ -1,156 +1,102 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+/**
+ * One booking, as the person who made it sees it.
+ *
+ * Reads `GET /me/bookings/:publicId`, which answers with the same view the
+ * anonymous manage page gets. That is deliberate on the server's side and worth
+ * relying on here: it is the only shape that carries the customer *policy* —
+ * whether this booking may still be moved or cancelled, and how many moves are
+ * left. The management endpoints omit it, because a workspace acting on a
+ * customer's phone call is not bound by the customer's own deadline, and a page
+ * built on those would offer buttons the write endpoints then refuse.
+ *
+ * Being signed in buys one thing over the emailed `apt_…` link: the change is
+ * attributable to an account rather than to whoever was holding a URL. It buys
+ * no extra authority. The scope is still "bookings belonging to this person's
+ * customer records", enforced inside the WHERE clause, so a handle belonging to
+ * somebody else and a handle belonging to nobody produce the same 404.
+ *
+ * **Rescheduling asks for a time in the venue's clock, not the reader's.** When
+ * somebody says they would like to come at ten, they mean ten where the
+ * appointment happens. The field says which zone it is reading, and where the
+ * reader's own clock differs the equivalent is shown underneath — silently
+ * converting one into the other is how a customer books 3:30am.
+ *
+ * There is no slot grid here, and that is a property of the API rather than an
+ * omission: availability is published per *booking link*, and an appointment
+ * does not record the link it was booked through. The person names a time and
+ * the server rules on it against live data, which is the same check a slot grid
+ * would only have been predicting.
+ */
+import { DateTime } from 'luxon';
 import {
-  Ban,
   CalendarClock,
+  CalendarX2,
+  CheckCircle2,
   Clock,
   Info,
   Mail,
   MapPin,
   Phone,
-  Receipt,
-  Sparkles,
   UserRound,
   Video,
 } from 'lucide-react';
-import { DateTime } from 'luxon';
-import { useState, type ReactNode } from 'react';
+import { useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { PageHeader } from '@/components/layout/PageHeader';
-import { SlotPicker } from '@/components/scheduling/SlotPicker';
+import { AppointmentStatusBadge } from '@/components/owner/StatusBadge';
 import {
   Button,
   Card,
   CardBody,
-  CardHeader,
-  Dialog,
+  ConfirmDialog,
+  DatePicker,
   ErrorState,
   Field,
   Skeleton,
   Textarea,
-  useToast,
+  TimePicker,
 } from '@/components/ui';
-import { ALLOWED_TRANSITIONS, AppointmentStatusBadge } from '@/components/owner';
-import { ApiError, api } from '@/lib/apiClient';
+import { isApiError } from '@/lib/apiClient';
 import {
+  browserTimezone,
+  canonicalTimezone,
   formatDateLong,
-  formatDateTime,
   formatDuration,
   formatMoney,
   formatRelative,
-  formatTime,
   formatTimeRange,
-  formatZoneOffset,
-  humanizeEnum,
+  formatZoneLabel,
 } from '@/lib/format';
-import type { PublicAppointment } from '@/types/api';
-import { FormBanner } from '@/pages/auth/FormBanner';
-import { customerKeys } from './api';
+import { useCancelPortalBooking, usePortalBooking, useReschedulePortalBooking } from './portalApi';
 
-const BREADCRUMBS = [{ label: 'My bookings', to: '/app/my/bookings' }, { label: 'Booking' }];
+const BREADCRUMBS = [{ label: 'Your bookings', to: '/portal/bookings' }, { label: 'Booking' }];
 
-/** Booking-form answers are workspace-defined, so values arrive untyped. */
-function answerToText(value: unknown): string {
-  if (value === null || value === undefined) return '—';
-  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
-  if (typeof value === 'string' || typeof value === 'number') return String(value);
-  if (Array.isArray(value)) return value.map((entry) => answerToText(entry)).join(', ');
-  return JSON.stringify(value);
-}
-
-function DetailRow({
-  icon,
-  label,
-  children,
-}: {
-  icon: JSX.Element;
-  label: string;
-  children: ReactNode;
-}): JSX.Element {
-  return (
-    <div className="flex items-start gap-3">
-      <span className="mt-0.5 shrink-0 text-fg-muted" aria-hidden="true">
-        {icon}
-      </span>
-      <div className="flex min-w-0 flex-col gap-0.5">
-        <dt className="text-xs font-medium uppercase tracking-wide text-fg-muted">{label}</dt>
-        <dd className="text-sm text-fg">{children}</dd>
-      </div>
-    </div>
-  );
-}
+/** Statuses after which nothing can be changed by anyone. */
+const TERMINAL_STATUSES = ['CANCELLED', 'COMPLETED', 'NO_SHOW', 'REJECTED'];
 
 export default function AppointmentDetailPage(): JSX.Element {
   const { publicId = '' } = useParams<{ publicId: string }>();
-  const queryClient = useQueryClient();
-  const { toast } = useToast();
 
+  const bookingQuery = usePortalBooking(publicId);
+  const reschedule = useReschedulePortalBooking(publicId);
+  const cancel = useCancelPortalBooking(publicId);
+
+  const [mode, setMode] = useState<'view' | 'reschedule'>('view');
+  const [newDate, setNewDate] = useState<string | null>(null);
+  const [newTime, setNewTime] = useState<string | null>(null);
+  const [moveReason, setMoveReason] = useState('');
   const [cancelOpen, setCancelOpen] = useState(false);
   const [cancelReason, setCancelReason] = useState('');
-  const [moveOpen, setMoveOpen] = useState(false);
-  const [moveDate, setMoveDate] = useState<string | null>(null);
-  const [moveSlot, setMoveSlot] = useState<string | null>(null);
-  const [moveReason, setMoveReason] = useState('');
   const [actionError, setActionError] = useState<string | null>(null);
-
-  /*
-   * Read from the public surface rather than from `/appointments/:id`.
-   *
-   * It is the only view that carries the customer *policy* — whether this
-   * booking can still be cancelled or moved, and how many moves are left — and
-   * it is the surface the matching write endpoints enforce that policy on. The
-   * management endpoints deliberately skip it, because a workspace acting for a
-   * customer who has just phoned in is not bound by the customer's deadline.
-   */
-  const bookingQuery = useQuery({
-    queryKey: customerKeys.booking(publicId),
-    queryFn: () => api.get<PublicAppointment>(`/public/appointments/${publicId}`),
-    enabled: publicId.length > 0,
-  });
-
-  const invalidate = (): void => {
-    void queryClient.invalidateQueries({ queryKey: customerKeys.booking(publicId) });
-    void queryClient.invalidateQueries({ queryKey: ['customer', 'appointments'] });
-  };
-
-  const cancelMutation = useMutation({
-    mutationFn: (reason: string | null) =>
-      api.post<PublicAppointment>(`/public/appointments/${publicId}/cancel`, { reason }),
-    onSuccess: () => {
-      setCancelOpen(false);
-      setCancelReason('');
-      setActionError(null);
-      toast({ title: 'Booking cancelled', tone: 'success' });
-      invalidate();
-    },
-    onError: (error: unknown) => {
-      setActionError(error instanceof ApiError ? error.message : 'Please try again in a moment.');
-    },
-  });
-
-  const moveMutation = useMutation({
-    mutationFn: (input: { startsAt: string; reason: string | null }) =>
-      api.post<PublicAppointment>(`/public/appointments/${publicId}/reschedule`, input),
-    onSuccess: () => {
-      setMoveOpen(false);
-      setMoveDate(null);
-      setMoveSlot(null);
-      setMoveReason('');
-      setActionError(null);
-      toast({ title: 'Booking moved', tone: 'success' });
-      invalidate();
-    },
-    onError: (error: unknown) => {
-      setActionError(error instanceof ApiError ? error.message : 'Please try again in a moment.');
-    },
-  });
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   if (bookingQuery.isPending) {
     return (
       <>
         <PageHeader title="Booking" breadcrumbs={BREADCRUMBS} />
         <div className="flex flex-col gap-4" aria-hidden="true">
-          <Skeleton className="h-28 w-full" />
-          <Skeleton className="h-48 w-full" />
+          <Skeleton className="h-28 w-full rounded-lg" />
+          <Skeleton className="h-48 w-full rounded-lg" />
         </div>
       </>
     );
@@ -163,8 +109,8 @@ export default function AppointmentDetailPage(): JSX.Element {
         <Card>
           <ErrorState
             error={bookingQuery.error}
-            onRetry={() => void bookingQuery.refetch()}
             title="We could not open this booking"
+            onRetry={() => void bookingQuery.refetch()}
           />
         </Card>
       </>
@@ -172,397 +118,425 @@ export default function AppointmentDetailPage(): JSX.Element {
   }
 
   const booking = bookingQuery.data;
-  // The zone the booking was confirmed in — the customer's own clock.
-  const zone = booking.timezone;
   const { policy, business } = booking;
 
-  const now = DateTime.now();
+  // The clock the appointment happens on, and the one the reader is in.
+  const venueZone = canonicalTimezone(booking.timezone);
+  // `browserTimezone` canonicalises on the way out, so both sides of the
+  // comparison below are in the same vocabulary.
+  const viewerZone = browserTimezone();
+  const zonesDiffer = venueZone !== viewerZone;
+
   const startsAt = DateTime.fromISO(booking.startsAt);
-  const cancelDeadline = startsAt.minus({ minutes: policy.cancellationDeadlineMinutes });
-  const moveDeadline = startsAt.minus({ minutes: policy.rescheduleDeadlineMinutes });
-  // A booking the state machine can no longer move is one nothing can be done
-  // to, whatever the policy deadlines say.
-  const terminal = ALLOWED_TRANSITIONS[booking.status].length === 0;
-  const statusPhrase = humanizeEnum(booking.status).toLowerCase();
+  const isPast = startsAt < DateTime.now();
+  const isTerminal = TERMINAL_STATUSES.includes(booking.status);
+  const noticeMinutes = startsAt.diff(DateTime.now(), 'minutes').minutes;
 
   /**
-   * Why an action is unavailable, in the customer's own terms.
+   * Why an action is closed, in the reader's terms.
    *
-   * `policy.canCancel` is a single boolean over three different reasons, so each
-   * is reconstructed from facts the payload actually carries rather than shown
-   * as a bare disabled button with no explanation.
+   * `canCancel` and `canReschedule` are single booleans over several different
+   * rules, so the specific one is reconstructed from the deadlines and counts
+   * the payload does carry. A disabled button with no explanation is a dead end,
+   * and the reader would have no way to tell "too late" from "not offered here".
    */
-  const explain = (kind: 'cancel' | 'move'): string => {
-    if (terminal) {
-      return `This booking is ${statusPhrase}, so there is nothing left to change.`;
-    }
-    const deadline = kind === 'cancel' ? cancelDeadline : moveDeadline;
-    if (now > deadline) {
-      return `The deadline for changing this online passed on ${formatDateTime(deadline, zone)}. ${business.name} can still help.`;
-    }
-    if (kind === 'move' && policy.remainingReschedules === 0) {
-      return `You have already moved this booking ${booking.rescheduleCount} ${
-        booking.rescheduleCount === 1 ? 'time' : 'times'
-      }, which is the most ${business.name} allows.`;
-    }
-    return `${business.name} does not take ${kind === 'cancel' ? 'cancellations' : 'changes'} online. Get in touch and they will sort it out.`;
-  };
+  function blockedReason(kind: 'reschedule' | 'cancel'): string | null {
+    const allowed = kind === 'cancel' ? policy.canCancel : policy.canReschedule;
+    if (allowed) return null;
+    if (isTerminal) return `This booking is ${booking.status.toLowerCase()}.`;
+    if (isPast) return 'This appointment has already passed.';
 
-  const answers = Object.entries(booking.answers);
-  const contact: ReactNode[] = [];
-  if (business.supportEmail) {
-    contact.push(
-      <a
-        key="email"
-        href={`mailto:${business.supportEmail}`}
-        className="rounded-xs text-brand-text underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-      >
-        {business.supportEmail}
-      </a>,
-    );
+    if (kind === 'reschedule' && policy.remainingReschedules <= 0) {
+      return `This booking has already been moved the maximum number of times. Contact ${business.name} if you still need to change it.`;
+    }
+
+    const deadline =
+      kind === 'cancel' ? policy.cancellationDeadlineMinutes : policy.rescheduleDeadlineMinutes;
+    if (noticeMinutes < deadline) {
+      const verb = kind === 'cancel' ? 'cancelled' : 'moved';
+      return `Bookings can only be ${verb} online more than ${formatDuration(deadline)} in advance. Contact ${business.name}.`;
+    }
+
+    const verb = kind === 'cancel' ? 'Cancelling' : 'Rescheduling';
+    return `${verb} online is not offered for this booking. Contact ${business.name}.`;
   }
-  if (business.supportPhone) {
-    contact.push(
-      <a
-        key="phone"
-        href={`tel:${business.supportPhone}`}
-        className="rounded-xs text-brand-text underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-      >
-        {business.supportPhone}
-      </a>,
-    );
+
+  const rescheduleBlocked = blockedReason('reschedule');
+  const cancelBlocked = blockedReason('cancel');
+
+  /**
+   * The instant the reader has settled on.
+   *
+   * Built in the venue's zone, which is what the field says it is reading. Null
+   * until both halves are chosen, so the submit button has something honest to
+   * be disabled by.
+   */
+  const chosenStartsAt =
+    newDate && newTime
+      ? (DateTime.fromISO(`${newDate}T${newTime}`, { zone: venueZone }).toISO() ?? null)
+      : null;
+
+  const todayAtVenue = DateTime.now().setZone(venueZone).toFormat('yyyy-MM-dd');
+
+  function leaveRescheduleMode(): void {
+    setMode('view');
+    setNewDate(null);
+    setNewTime(null);
+    setMoveReason('');
+  }
+
+  async function submitReschedule(): Promise<void> {
+    if (!chosenStartsAt) return;
+    setActionError(null);
+    setStatusMessage(null);
+    try {
+      await reschedule.mutateAsync({
+        startsAt: chosenStartsAt,
+        ...(moveReason.trim() ? { reason: moveReason.trim() } : {}),
+      });
+      leaveRescheduleMode();
+      setStatusMessage('Your booking has been moved. A new confirmation is on its way.');
+    } catch (error) {
+      setActionError(
+        isApiError(error) ? error.message : 'We could not move your booking. Please try again.',
+      );
+    }
+  }
+
+  async function submitCancel(): Promise<void> {
+    setActionError(null);
+    setStatusMessage(null);
+    try {
+      await cancel.mutateAsync(cancelReason.trim() ? { reason: cancelReason.trim() } : {});
+      setCancelOpen(false);
+      setCancelReason('');
+      setStatusMessage('Your booking has been cancelled.');
+    } catch (error) {
+      setCancelOpen(false);
+      setActionError(
+        isApiError(error) ? error.message : 'We could not cancel your booking. Please try again.',
+      );
+    }
   }
 
   return (
     <>
       <PageHeader
-        title={booking.service?.name ?? booking.title ?? 'Your booking'}
+        title={booking.service?.name ?? booking.title ?? 'Booking'}
         breadcrumbs={BREADCRUMBS}
-        description={
-          <>
-            {formatDateLong(booking.startsAt, zone)} ·{' '}
-            {formatTimeRange(booking.startsAt, booking.endsAt, zone)} (
-            {formatZoneOffset(zone, booking.startsAt)}) · {formatDuration(booking.durationMinutes)}
-          </>
-        }
+        description={`With ${business.name}`}
         actions={<AppointmentStatusBadge status={booking.status} />}
       />
 
-      {actionError ? <FormBanner message={actionError} /> : null}
-
-      {booking.status === 'CANCELLED' && booking.cancellationReason ? (
+      {/* One element, both seen and announced: `role="status"` is an implicit
+          polite live region, so a visually-hidden copy would be read twice. */}
+      {statusMessage ? (
         <div
           role="status"
-          className="flex items-start gap-2.5 rounded-md border border-danger-border bg-danger-subtle px-3.5 py-3 text-sm text-danger-text"
+          className="flex items-start gap-2 rounded-lg border border-success-border bg-success-subtle px-3 py-2 text-sm text-success-text"
         >
-          <Info className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-          <p className="leading-relaxed">Cancelled: {booking.cancellationReason}</p>
+          <CheckCircle2 aria-hidden className="mt-0.5 size-4 shrink-0" />
+          {statusMessage}
         </div>
       ) : null}
 
-      {/* --- What you can still change ------------------------------------- */}
-      <Card>
-        <CardHeader
-          as="h2"
-          title="Changing this booking"
-          description={`${business.name} sets these rules. They are shown in your own time, ${zone.replace(/_/g, ' ')}.`}
-        />
-        <CardBody className="flex flex-col gap-5">
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="flex flex-col gap-2 rounded-lg border border-border p-4">
-              <p className="text-sm font-semibold text-fg">Cancelling</p>
-              {policy.canCancel ? (
-                <p className="text-sm text-fg-secondary">
-                  Free to cancel until{' '}
-                  <span className="font-medium text-fg">
-                    {formatDateTime(cancelDeadline, zone)}
-                  </span>{' '}
-                  — {formatRelative(cancelDeadline, zone)}.
-                </p>
-              ) : (
-                <p className="text-sm text-fg-muted">{explain('cancel')}</p>
-              )}
-              <div className="mt-1">
-                <Button
-                  variant="danger"
-                  size="sm"
-                  disabled={!policy.canCancel}
-                  leadingIcon={<Ban className="size-4" aria-hidden="true" />}
-                  onClick={() => setCancelOpen(true)}
-                >
-                  Cancel booking
-                </Button>
-              </div>
-            </div>
+      {actionError ? (
+        <div
+          role="alert"
+          className="rounded-lg border border-danger-border bg-danger-subtle px-3 py-2 text-sm text-danger-text"
+        >
+          {actionError}
+        </div>
+      ) : null}
 
-            <div className="flex flex-col gap-2 rounded-lg border border-border p-4">
-              <p className="text-sm font-semibold text-fg">Moving it</p>
-              {policy.canReschedule ? (
-                <p className="text-sm text-fg-secondary">
-                  Can be moved until{' '}
-                  <span className="font-medium text-fg">{formatDateTime(moveDeadline, zone)}</span>.{' '}
-                  {policy.remainingReschedules} change
-                  {policy.remainingReschedules === 1 ? '' : 's'} left.
-                </p>
-              ) : (
-                <p className="text-sm text-fg-muted">{explain('move')}</p>
-              )}
-              <div className="mt-1">
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  disabled={!policy.canReschedule}
-                  leadingIcon={<CalendarClock className="size-4" aria-hidden="true" />}
-                  onClick={() => setMoveOpen(true)}
-                >
-                  Move booking
-                </Button>
-              </div>
-            </div>
+      {booking.status === 'CANCELLED' ? (
+        <div className="flex items-start gap-2 rounded-lg bg-surface-sunken px-3 py-2 text-sm text-fg-secondary">
+          <CalendarX2 aria-hidden className="mt-0.5 size-4 shrink-0" />
+          <span>
+            This booking was cancelled
+            {booking.cancelledAt ? ` ${formatRelative(booking.cancelledAt, viewerZone)}` : ''}.
+            {booking.cancellationReason ? ` Reason: ${booking.cancellationReason}` : ''}
+          </span>
+        </div>
+      ) : null}
+
+      {booking.requiresApproval && booking.status === 'PENDING' ? (
+        <div className="flex items-start gap-2 rounded-lg bg-info-subtle px-3 py-2 text-sm text-info-text">
+          <Info aria-hidden className="mt-0.5 size-4 shrink-0" />
+          {business.name} has not confirmed this request yet. You will be emailed when they do.
+        </div>
+      ) : null}
+
+      <Card>
+        <CardBody className="space-y-4">
+          <div className="flex items-start justify-between gap-4">
+            <p className="text-sm text-fg-muted">
+              {formatDuration(booking.durationMinutes)}
+              {booking.rescheduleCount > 0
+                ? ` · moved ${booking.rescheduleCount} time${booking.rescheduleCount === 1 ? '' : 's'}`
+                : ''}
+            </p>
+            <p className="shrink-0 font-medium">
+              {formatMoney(booking.priceAmount, booking.currency)}
+            </p>
           </div>
 
-          {contact.length > 0 ? (
-            <p className="flex flex-wrap items-center gap-2 border-t border-border pt-4 text-sm text-fg-muted">
-              <Phone className="size-4 shrink-0" aria-hidden="true" />
-              Need something else? Contact {business.name} on{' '}
-              {contact.map((node, index) => (
-                <span key={index}>
-                  {index > 0 ? ' or ' : ''}
-                  {node}
-                </span>
-              ))}
-              .
-            </p>
+          <dl className="grid gap-3 text-sm sm:grid-cols-2">
+            <div className="flex gap-2">
+              <Clock aria-hidden className="mt-0.5 size-4 shrink-0 text-fg-muted" />
+              <div>
+                <dt className="text-fg-muted">When</dt>
+                <dd className="font-medium">
+                  {formatDateLong(booking.startsAt, viewerZone)}
+                  <br />
+                  {formatTimeRange(booking.startsAt, booking.endsAt, viewerZone)}
+                  <span className="block font-normal text-fg-muted">
+                    {formatZoneLabel(viewerZone)}
+                  </span>
+                  {/* Both clocks, never one silently standing in for the other. */}
+                  {zonesDiffer ? (
+                    <span className="mt-1 block font-normal text-fg-muted">
+                      {formatTimeRange(booking.startsAt, booking.endsAt, venueZone)} where it
+                      happens — {formatZoneLabel(venueZone)}
+                    </span>
+                  ) : null}
+                </dd>
+              </div>
+            </div>
+
+            {booking.staff ? (
+              <div className="flex gap-2">
+                <UserRound aria-hidden className="mt-0.5 size-4 shrink-0 text-fg-muted" />
+                <div>
+                  <dt className="text-fg-muted">With</dt>
+                  <dd className="font-medium">{booking.staff.displayName}</dd>
+                </div>
+              </div>
+            ) : null}
+
+            {booking.location ? (
+              <div className="flex gap-2">
+                <MapPin aria-hidden className="mt-0.5 size-4 shrink-0 text-fg-muted" />
+                <div>
+                  <dt className="text-fg-muted">Where</dt>
+                  <dd className="font-medium">
+                    {booking.location.name}
+                    {booking.location.address ? (
+                      <span className="block font-normal text-fg-muted">
+                        {booking.location.address}
+                      </span>
+                    ) : null}
+                  </dd>
+                </div>
+              </div>
+            ) : null}
+
+            <div className="flex gap-2">
+              <Info aria-hidden className="mt-0.5 size-4 shrink-0 text-fg-muted" />
+              <div>
+                <dt className="text-fg-muted">Reference</dt>
+                <dd className="font-medium tabular-nums">{booking.publicId}</dd>
+              </div>
+            </div>
+          </dl>
+
+          {booking.location?.virtualMeetingUrl ? (
+            <a
+              href={booking.location.virtualMeetingUrl}
+              target="_blank"
+              rel="noreferrer noopener"
+              className="inline-flex items-center gap-2 rounded-lg border border-border bg-surface px-3 py-2 text-sm font-medium hover:bg-surface-hover focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+            >
+              <Video aria-hidden className="size-4" />
+              Join the video call
+            </a>
+          ) : null}
+
+          {booking.customerNotes ? (
+            <div className="rounded-lg bg-surface-sunken px-3 py-2 text-sm">
+              <p className="text-fg-muted">Your note</p>
+              <p className="whitespace-pre-line">{booking.customerNotes}</p>
+            </div>
+          ) : null}
+
+          {business.supportEmail || business.supportPhone ? (
+            <div className="flex flex-wrap items-center gap-4 border-t border-border pt-3 text-sm">
+              <span className="text-fg-muted">Contact {business.name}</span>
+              {business.supportEmail ? (
+                <a
+                  href={`mailto:${business.supportEmail}`}
+                  className="inline-flex items-center gap-1.5 rounded-xs font-medium text-brand-text underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                >
+                  <Mail aria-hidden className="size-4" />
+                  {business.supportEmail}
+                </a>
+              ) : null}
+              {business.supportPhone ? (
+                <a
+                  href={`tel:${business.supportPhone}`}
+                  className="inline-flex items-center gap-1.5 rounded-xs font-medium text-brand-text underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                >
+                  <Phone aria-hidden className="size-4" />
+                  {business.supportPhone}
+                </a>
+              ) : null}
+            </div>
           ) : null}
         </CardBody>
       </Card>
 
-      {/* --- The booking ---------------------------------------------------- */}
-      <div className="grid gap-6 lg:grid-cols-2">
-        <Card>
-          <CardHeader as="h2" title="What you booked" />
-          <CardBody>
-            <dl className="flex flex-col gap-4">
-              <DetailRow icon={<Sparkles className="size-4" />} label="Service">
-                {booking.service?.name ?? 'Appointment'}
-                {booking.service?.description ? (
-                  <span className="block text-sm leading-relaxed text-fg-muted">
-                    {booking.service.description}
-                  </span>
-                ) : null}
-              </DetailRow>
-              <DetailRow icon={<Clock className="size-4" />} label="When">
-                {formatDateLong(booking.startsAt, zone)},{' '}
-                {formatTimeRange(booking.startsAt, booking.endsAt, zone)}
-                {!terminal ? (
-                  <span className="block text-sm text-fg-muted">
-                    {formatRelative(booking.startsAt, zone)}
-                  </span>
-                ) : null}
-              </DetailRow>
-              {booking.staff ? (
-                <DetailRow icon={<UserRound className="size-4" />} label="With">
-                  {booking.staff.displayName}
-                </DetailRow>
+      {!isTerminal && !isPast ? (
+        <div className="flex flex-col gap-3">
+          {mode === 'view' ? (
+            <>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  onClick={() => {
+                    setMode('reschedule');
+                    setActionError(null);
+                    setStatusMessage(null);
+                  }}
+                  disabled={!policy.canReschedule}
+                  leadingIcon={<CalendarClock aria-hidden className="size-4" />}
+                >
+                  Move this booking
+                </Button>
+                <Button
+                  variant="danger"
+                  onClick={() => setCancelOpen(true)}
+                  disabled={!policy.canCancel}
+                  leadingIcon={<CalendarX2 aria-hidden className="size-4" />}
+                >
+                  Cancel
+                </Button>
+              </div>
+
+              {rescheduleBlocked ? (
+                <p className="text-sm text-fg-muted">{rescheduleBlocked}</p>
               ) : null}
-              {booking.location ? (
-                <DetailRow icon={<MapPin className="size-4" />} label="Where">
-                  {booking.location.name}
-                  {booking.location.address ? (
-                    <span className="block text-sm text-fg-muted">{booking.location.address}</span>
-                  ) : null}
-                  {booking.location.timezone !== zone ? (
-                    <span className="block text-sm text-fg-muted">
-                      Local time there: {formatTime(booking.startsAt, booking.location.timezone)}
-                    </span>
-                  ) : null}
-                </DetailRow>
+              {cancelBlocked && cancelBlocked !== rescheduleBlocked ? (
+                <p className="text-sm text-fg-muted">{cancelBlocked}</p>
               ) : null}
-              {booking.location?.virtualMeetingUrl ? (
-                <DetailRow icon={<Video className="size-4" />} label="Join">
-                  <a
-                    href={booking.location.virtualMeetingUrl}
-                    target="_blank"
-                    rel="noreferrer noopener"
-                    className="rounded-xs break-all text-brand-text underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
-                  >
-                    {booking.location.virtualMeetingUrl}
-                  </a>
-                </DetailRow>
+              {policy.canReschedule && policy.remainingReschedules > 0 ? (
+                <p className="text-sm text-fg-muted">
+                  You can move this booking {policy.remainingReschedules} more time
+                  {policy.remainingReschedules === 1 ? '' : 's'}.
+                </p>
               ) : null}
-              <DetailRow icon={<Receipt className="size-4" />} label="Price">
-                {booking.priceAmount > 0
-                  ? formatMoney(booking.priceAmount, booking.currency)
-                  : 'No charge'}
-              </DetailRow>
-              <DetailRow icon={<CalendarClock className="size-4" />} label="Reference">
-                <span className="font-mono text-xs">{booking.publicId}</span>
-              </DetailRow>
-            </dl>
-          </CardBody>
-        </Card>
-
-        <Card>
-          <CardHeader as="h2" title="What you told them" />
-          <CardBody className="flex flex-col gap-4">
-            {booking.customerNotes ? (
-              <p className="whitespace-pre-wrap text-sm leading-relaxed text-fg-secondary">
-                {booking.customerNotes}
-              </p>
-            ) : null}
-
-            {answers.length > 0 ? (
-              <dl className="flex flex-col gap-2">
-                {answers.map(([key, value]) => (
-                  <div key={key} className="flex flex-wrap items-baseline gap-x-2">
-                    <dt className="text-xs font-medium uppercase tracking-wide text-fg-muted">
-                      {humanizeEnum(key.replace(/([a-z])([A-Z])/g, '$1_$2'))}
-                    </dt>
-                    <dd className="text-sm text-fg-secondary">{answerToText(value)}</dd>
-                  </div>
-                ))}
-              </dl>
-            ) : null}
-
-            {!booking.customerNotes && answers.length === 0 ? (
-              <p className="text-sm text-fg-muted">
-                You did not add any notes when you booked. Contact {business.name} if there is
-                something they should know.
-              </p>
-            ) : null}
-
-            {booking.confirmedAt ? (
-              <p className="border-t border-border pt-4 text-xs text-fg-muted">
-                Confirmed {formatDateTime(booking.confirmedAt, zone)}.
-              </p>
-            ) : booking.requiresApproval ? (
-              <p className="flex items-start gap-2 border-t border-border pt-4 text-xs leading-relaxed text-fg-muted">
-                <Mail className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
-                {business.name} is still reviewing this request. You will hear from them once it is
-                confirmed.
-              </p>
-            ) : null}
-          </CardBody>
-        </Card>
-      </div>
-
-      {/* --- Cancel ---------------------------------------------------------- */}
-      <Dialog
-        open={cancelOpen}
-        onClose={() => setCancelOpen(false)}
-        title="Cancel this booking?"
-        description={`Your appointment with ${business.name} on ${formatDateLong(booking.startsAt, zone)} will be released. This cannot be undone.`}
-        width="sm"
-        dismissOnBackdrop={!cancelMutation.isPending}
-        footer={
-          <>
-            <Button
-              variant="secondary"
-              onClick={() => setCancelOpen(false)}
-              disabled={cancelMutation.isPending}
-            >
-              Keep my booking
-            </Button>
-            <Button
-              variant="danger"
-              loading={cancelMutation.isPending}
-              onClick={() =>
-                cancelMutation.mutate(cancelReason.trim().length > 0 ? cancelReason.trim() : null)
-              }
-            >
-              Cancel booking
-            </Button>
-          </>
-        }
-      >
-        <Field label="Reason" hint="Shared with the business. Optional.">
-          {(fieldProps) => (
-            <Textarea
-              {...fieldProps}
-              value={cancelReason}
-              onChange={(event) => setCancelReason(event.target.value)}
-              rows={3}
-              maxLength={500}
-              placeholder="Anything they should know?"
-            />
-          )}
-        </Field>
-      </Dialog>
-
-      {/* --- Move ------------------------------------------------------------ */}
-      <Dialog
-        open={moveOpen}
-        onClose={() => setMoveOpen(false)}
-        title="Move this booking"
-        description={`Currently ${formatDateLong(booking.startsAt, zone)} at ${formatTime(booking.startsAt, zone)}.`}
-        width="lg"
-        dismissOnBackdrop={false}
-        footer={
-          <>
-            <Button
-              variant="secondary"
-              onClick={() => setMoveOpen(false)}
-              disabled={moveMutation.isPending}
-            >
-              Keep the current time
-            </Button>
-            <Button
-              loading={moveMutation.isPending}
-              disabled={moveSlot === null}
-              onClick={() => {
-                if (moveSlot === null) return;
-                moveMutation.mutate({
-                  startsAt: moveSlot,
-                  reason: moveReason.trim().length > 0 ? moveReason.trim() : null,
-                });
-              }}
-            >
-              Move booking
-            </Button>
-          </>
-        }
-      >
-        <div className="flex flex-col gap-4">
-          {booking.service && booking.staff ? (
-            <SlotPicker
-              serviceId={booking.service.id}
-              staffProfileId={booking.staff.id}
-              timezone={zone}
-              date={moveDate}
-              onDateChange={(next) => {
-                setMoveDate(next);
-                setMoveSlot(null);
-              }}
-              value={moveSlot}
-              onChange={setMoveSlot}
-              currentStartsAt={booking.startsAt}
-              disabled={moveMutation.isPending}
-            />
+            </>
           ) : (
-            <p className="text-sm text-fg-muted">
-              This booking has no service or provider attached, so there are no times to search.
-              Contact {business.name} to move it.
-            </p>
+            <Card>
+              <CardBody className="space-y-5">
+                <p className="flex items-start gap-2 rounded-lg bg-info-subtle px-3 py-2 text-sm text-info-text">
+                  <Info aria-hidden className="mt-0.5 size-4 shrink-0" />
+                  Choose when you would like to come instead. We will check it against{' '}
+                  {business.name}&rsquo;s calendar and tell you straight away if it is not free.
+                </p>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <Field label="New date" required>
+                    {(props) => (
+                      <DatePicker
+                        {...props}
+                        value={newDate}
+                        // The venue's clock, so "today" is today where the
+                        // appointment happens rather than where the reader is.
+                        timezone={venueZone}
+                        min={todayAtVenue}
+                        onChange={setNewDate}
+                      />
+                    )}
+                  </Field>
+                  <Field
+                    label="New time"
+                    required
+                    hint={`Read as ${formatZoneLabel(venueZone)} — the clock ${business.name} works to.`}
+                  >
+                    {(props) => <TimePicker {...props} value={newTime} onChange={setNewTime} />}
+                  </Field>
+                </div>
+
+                {/* The same instant in the reader's own clock, so a cross-zone
+                    booking cannot be made by accident. Rendered only once both
+                    halves are chosen — there is nothing to convert before that. */}
+                {chosenStartsAt && zonesDiffer ? (
+                  <p className="text-sm text-fg-secondary">
+                    That is{' '}
+                    <span className="font-medium">
+                      {formatDateLong(chosenStartsAt, viewerZone)},{' '}
+                      {DateTime.fromISO(chosenStartsAt).setZone(viewerZone).toFormat('h:mm a')}
+                    </span>{' '}
+                    in your own time zone.
+                  </p>
+                ) : null}
+
+                <Field label="Reason" hint="Optional. Shared with the business.">
+                  {(props) => (
+                    <Textarea
+                      {...props}
+                      rows={2}
+                      value={moveReason}
+                      onChange={(event) => setMoveReason(event.target.value)}
+                      placeholder="Let them know why, if you would like to."
+                    />
+                  )}
+                </Field>
+
+                <p aria-live="polite" className="mf-sr-only">
+                  {reschedule.isPending ? 'Moving your booking' : ''}
+                </p>
+
+                <div className="flex items-center justify-between gap-3">
+                  <Button
+                    variant="ghost"
+                    onClick={leaveRescheduleMode}
+                    disabled={reschedule.isPending}
+                  >
+                    Keep the current time
+                  </Button>
+                  <Button
+                    onClick={() => void submitReschedule()}
+                    disabled={!chosenStartsAt}
+                    loading={reschedule.isPending}
+                  >
+                    Move booking
+                  </Button>
+                </div>
+              </CardBody>
+            </Card>
           )}
-
-          <Field label="Reason" hint="Shared with the business. Optional.">
-            {(fieldProps) => (
-              <Textarea
-                {...fieldProps}
-                value={moveReason}
-                onChange={(event) => setMoveReason(event.target.value)}
-                rows={2}
-                maxLength={500}
-              />
-            )}
-          </Field>
-
-          <p className="text-xs text-fg-muted">
-            You have {policy.remainingReschedules} change
-            {policy.remainingReschedules === 1 ? '' : 's'} left on this booking.
-          </p>
         </div>
-      </Dialog>
+      ) : null}
+
+      <ConfirmDialog
+        open={cancelOpen}
+        onCancel={() => setCancelOpen(false)}
+        onConfirm={() => void submitCancel()}
+        title="Cancel this booking?"
+        confirmLabel="Cancel booking"
+        cancelLabel="Keep it"
+        destructive
+        loading={cancel.isPending}
+        description={
+          <div className="space-y-3">
+            <p>
+              This frees the slot for somebody else and cannot be undone. {business.name} will be
+              notified, and you would have to book again from the start.
+            </p>
+            <Field label="Reason" hint="Optional">
+              {(props) => (
+                <Textarea
+                  {...props}
+                  rows={3}
+                  value={cancelReason}
+                  onChange={(event) => setCancelReason(event.target.value)}
+                  placeholder="Let them know why, if you would like to."
+                />
+              )}
+            </Field>
+          </div>
+        }
+      />
     </>
   );
 }

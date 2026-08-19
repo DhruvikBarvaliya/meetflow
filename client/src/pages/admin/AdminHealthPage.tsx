@@ -1,8 +1,26 @@
 import { useQuery } from '@tanstack/react-query';
-import { Database, Inbox, RefreshCw, Server, Zap, type LucideIcon } from 'lucide-react';
+import {
+  Database,
+  Inbox,
+  RefreshCw,
+  Server,
+  ShieldAlert,
+  Zap,
+  type LucideIcon,
+} from 'lucide-react';
 import { useMemo } from 'react';
+import { Link } from 'react-router-dom';
 import { PageHeader } from '@/components/layout';
-import { Badge, Button, Card, CardBody, CardHeader, ErrorState, Skeleton } from '@/components/ui';
+import {
+  Badge,
+  Button,
+  Card,
+  CardBody,
+  CardHeader,
+  ErrorState,
+  Skeleton,
+  buttonStyles,
+} from '@/components/ui';
 import { cn } from '@/lib/cn';
 import { browserTimezone, formatNumber, formatRelative } from '@/lib/format';
 import type { AdminHealth } from '@/types/api';
@@ -123,6 +141,17 @@ export default function AdminHealthPage(): JSX.Element {
                 Updated {formatRelative(data.generatedAt, zone)}
               </p>
             ) : null}
+            {/*
+             * The other half of an incident. This page answers "is a dependency
+             * down and is the queue draining"; the security page answers "is
+             * somebody attacking the front door". Neither can see the other's
+             * signal, and an operator arriving here on a hunch should not have
+             * to know the second screen exists to find it.
+             */}
+            <Link to="/admin/security" className={buttonStyles('secondary', 'sm')}>
+              <ShieldAlert className="size-4" aria-hidden="true" />
+              Security
+            </Link>
             {/*
              * Deliberately not wired to `isFetching`: the poll would flip this
              * into a spinner every fifteen seconds, which reads as the page

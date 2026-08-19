@@ -3,6 +3,7 @@ import {
   Building2,
   LayoutDashboard,
   ScrollText,
+  ShieldAlert,
   Users,
   type LucideIcon,
 } from 'lucide-react';
@@ -43,5 +44,11 @@ export const ADMIN_NAVIGATION: AdminNavItem[] = [
   { label: 'Workspaces', to: '/admin/workspaces', icon: Building2 },
   { label: 'Users', to: '/admin/users', icon: Users },
   { label: 'Audit log', to: '/admin/audit', icon: ScrollText },
+  // Between the audit log and system health because that is where it sits in
+  // an incident: the log is the raw trail, Security is the sign-in and
+  // recovery signal read out of it, and health is the dependency picture.
+  // Every figure on it is a count from the same `/admin/audit-logs` endpoint
+  // the audit page reads, so the two never disagree.
+  { label: 'Security', to: '/admin/security', icon: ShieldAlert },
   { label: 'System health', to: '/admin/health', icon: Activity },
 ];

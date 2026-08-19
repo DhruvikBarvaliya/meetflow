@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { CalendarX2 } from 'lucide-react';
+import { CalendarPlus, CalendarX2 } from 'lucide-react';
 import { DateTime } from 'luxon';
 import { useCallback, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
@@ -9,6 +9,7 @@ import {
   AppointmentActions,
   AppointmentDetailDrawer,
   AppointmentStatusBadge,
+  BookAppointmentDrawer,
   DataState,
   FilterBar,
   FilterField,
@@ -41,6 +42,7 @@ import {
 } from '@/components/ui';
 import { useAuth } from '@/context/AuthContext';
 import { api } from '@/lib/apiClient';
+import { PERMISSIONS } from '@/lib/permissions';
 import {
   formatDayLabel,
   formatDuration,
@@ -73,7 +75,7 @@ const STATUS_OPTIONS = [
  * "what is on today".
  */
 export default function AppointmentsPage(): JSX.Element {
-  const { activeBusinessId, activeTimezone } = useAuth();
+  const { activeBusinessId, activeTimezone, can } = useAuth();
   const queryClient = useQueryClient();
   const staff = useStaffLookup();
   const services = useServicesLookup();
@@ -93,6 +95,9 @@ export default function AppointmentsPage(): JSX.Element {
   const [search, setSearch] = useState('');
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [rescheduling, setRescheduling] = useState<RescheduleTarget | null>(null);
+  const [booking, setBooking] = useState(false);
+
+  const canBook = can(PERMISSIONS.APPOINTMENTS_CREATE);
 
   const debouncedSearch = useDebouncedValue(search);
 
@@ -161,11 +166,21 @@ export default function AppointmentsPage(): JSX.Element {
         title="Appointments"
         description={`Every booking in this workspace. Times are shown in ${activeTimezone}, the clock the diary is kept in.`}
         actions={
-          hasFilters ? (
-            <Button variant="secondary" onClick={clearFilters}>
-              Clear filters
-            </Button>
-          ) : null
+          <div className="flex items-center gap-2">
+            {hasFilters ? (
+              <Button variant="secondary" onClick={clearFilters}>
+                Clear filters
+              </Button>
+            ) : null}
+            {canBook ? (
+              <Button
+                onClick={() => setBooking(true)}
+                leadingIcon={<CalendarPlus className="size-4" aria-hidden="true" />}
+              >
+                Take a booking
+              </Button>
+            ) : null}
+          </div>
         }
       >
         <FilterBar>
@@ -298,6 +313,13 @@ export default function AppointmentsPage(): JSX.Element {
                   <Button variant="secondary" onClick={clearFilters}>
                     Clear filters
                   </Button>
+                ) : canBook ? (
+                  <Button
+                    onClick={() => setBooking(true)}
+                    leadingIcon={<CalendarPlus className="size-4" aria-hidden="true" />}
+                  >
+                    Take a booking
+                  </Button>
                 ) : null
               }
             />
@@ -405,6 +427,24 @@ export default function AppointmentsPage(): JSX.Element {
         open={rescheduling !== null}
         onClose={() => setRescheduling(null)}
         onMoved={refresh}
+      />
+
+      {/*
+       * Seeded from the filter bar rather than from nothing: somebody who has
+       * narrowed the diary to one provider and one day is almost always about
+       * to book into exactly that. `refresh` alone would do — the drawer
+       * invalidates the same prefix itself — but opening the new booking is
+       * what the person who just made it wants to see.
+       */}
+      <BookAppointmentDrawer
+        open={booking}
+        onClose={() => setBooking(false)}
+        initialDate={fromDate === '' ? null : fromDate}
+        initialStaffProfileId={staffFilter === '' ? null : staffFilter}
+        onBooked={(appointment) => {
+          refresh();
+          setSelectedId(appointment.id);
+        }}
       />
     </>
   );

@@ -281,6 +281,14 @@ export interface Membership {
 export interface MeResponse {
   user: Pick<AuthUser, 'id' | 'email' | 'platformRole'>;
   memberships: Membership[];
+  /**
+   * How many workspaces hold a customer record for this person.
+   *
+   * Exists so the client can tell a brand-new business owner apart from a
+   * customer when neither holds a membership. Both look identical otherwise,
+   * and they belong in opposite places — onboarding, or their own bookings.
+   */
+  customerProfiles: number;
   activeWorkspace: {
     businessId: string;
     businessSlug: string;
@@ -1294,4 +1302,343 @@ export interface AdminAuditFilters {
    * from a user's detail page can pre-filter the log to that account.
    */
   actorUserId?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Workspace administration
+// ---------------------------------------------------------------------------
+
+/*
+ * Members, the workspace's own audit trail and outbound webhooks — the three
+ * surfaces under `/api/v1/members`, `/api/v1/audit-logs` and `/api/v1/webhooks`.
+ *
+ * All three are mounted on the tenant-scoped management router, so **no shape
+ * below carries a `businessId`**. The workspace is resolved from the caller's
+ * membership and no parameter these endpoints accept can widen it; echoing the
+ * id back would imply a feed that could ever contain another tenant's rows.
+ * That is the one property to preserve if anything here is extended.
+ *
+ * Every date arrives as an ISO-8601 instant even where the service types it as
+ * a `Date` — it has been through `JSON.stringify` by the time this client sees
+ * it — so the fields below are `string`, matching the rest of this file.
+ */
+
+// --- Members ---------------------------------------------------------------
+
+/**
+ * Sourced from `PERMISSION_EFFECTS` in
+ * server/src/database/models/MembershipPermission.ts.
+ *
+ * A DENY beats both the role and a GRANT, which is the whole point of the
+ * table: revoking one capability from one person without cloning a role.
+ */
+export const MEMBERSHIP_PERMISSION_EFFECTS = ['GRANT', 'DENY'] as const;
+export type MembershipPermissionEffect = (typeof MEMBERSHIP_PERMISSION_EFFECTS)[number];
+
+/**
+ * The statuses `GET /members` will filter on, from `listableStatusSchema` in
+ * members.validation.ts.
+ *
+ * REMOVED is absent deliberately: a removed membership is soft deleted, so it
+ * is excluded by the paranoid scope rather than by its status. `includeRemoved`
+ * is the switch that brings those rows back, not a status value.
+ */
+export const MEMBER_LISTABLE_STATUSES = ['ACTIVE', 'INVITED', 'SUSPENDED'] as const;
+export type MemberListableStatus = (typeof MEMBER_LISTABLE_STATUSES)[number];
+
+/**
+ * A row from `GET /members` — `MemberView` in members.service.ts.
+ *
+ * Distinct from `WorkspaceMember` above, which is the older unpaginated
+ * `GET /workspace/members` shape that `StaffPage` still reads. Two fields make
+ * this the one an administration screen needs: `isOwner`, which is the guard
+ * the server actually enforces rather than something inferable from a role key,
+ * and `removedAt`, which is how a past member is told apart from a present one
+ * once `includeRemoved` is on.
+ */
+export interface MemberRecord {
+  /** The *membership* id. Every write below is addressed by this, not by user id. */
+  id: string;
+  status: MembershipStatus;
+  /** The account in `businesses.owner_user_id`, whose membership is immutable. */
+  isOwner: boolean;
+  invitedAt: string | null;
+  joinedAt: string | null;
+  createdAt: string;
+  /** Non-null only on rows fetched with `includeRemoved`. */
+  removedAt: string | null;
+  user: {
+    id: string;
+    email: string;
+    firstName: string;
+    lastName: string;
+    /** Built on the server, so a member's name is joined in exactly one place. */
+    fullName: string;
+    avatarUrl: string | null;
+    /**
+     * The service types this as a bare `string` because it reads the column
+     * without interpreting it; the CHECK constraint on `users.status` admits
+     * nothing outside `UserStatus`.
+     */
+    status: UserStatus;
+  };
+  role: { id: string; key: string; name: string };
+  staffProfile: { id: string; displayName: string; isBookable: boolean; isActive: boolean } | null;
+}
+
+export interface MemberPermissionOverride {
+  /** A key from the catalogue, e.g. `appointments:cancel`. */
+  permission: string;
+  effect: MembershipPermissionEffect;
+}
+
+/**
+ * `GET /members/{id}/permissions` — what one member may do, and why.
+ *
+ * The three lists are not redundant. `rolePermissions` is what the role grants
+ * before any exception, `overrides` is the per-member exception set, and
+ * `effectivePermissions` is what `requirePermission` will actually enforce.
+ * Showing only the last would make an override indistinguishable from a role
+ * that happens to grant the same thing, which is the distinction an operator
+ * opens this panel to see.
+ */
+export interface MemberPermissions {
+  membershipId: string;
+  role: { id: string; key: string; name: string };
+  rolePermissions: string[];
+  overrides: MemberPermissionOverride[];
+  effectivePermissions: string[];
+}
+
+export interface InviteMemberRequest {
+  email: string;
+  roleId: string;
+  /**
+   * Consulted only when the address has no account yet, because `users`
+   * requires a name. Sending them for a colleague who already has an account
+   * changes nothing — an invitation must not be able to rewrite somebody's
+   * profile.
+   */
+  firstName?: string;
+  lastName?: string;
+}
+
+/**
+ * INVITED and REMOVED are not settable. INVITED is written by the invitation
+ * path and cleared by acceptance; REMOVED belongs to `DELETE /members/{id}`,
+ * which also soft deletes the row so the address can be invited again.
+ */
+export interface UpdateMemberRequest {
+  roleId?: string;
+  status?: 'ACTIVE' | 'SUSPENDED';
+}
+
+export interface MemberFilters {
+  page: number;
+  search: string;
+  status: MemberListableStatus | '';
+  roleId: string;
+  /** Brings soft-deleted rows back, so somebody who left can be found. */
+  includeRemoved: boolean;
+}
+
+// --- Audit trail -----------------------------------------------------------
+
+/**
+ * Sourced from `AUDIT_ACTOR_TYPES` in server/src/database/models/AuditLog.ts.
+ *
+ * `AdminAuditActorType` above names the same five values off the same column;
+ * it predates this array and belongs to the platform surface, which this file
+ * keeps separate throughout. Anything new should build on the array, since a
+ * dropdown and a lookup can then be derived from one list.
+ */
+export const AUDIT_ACTOR_TYPES = ['USER', 'CUSTOMER', 'SYSTEM', 'PUBLIC', 'API'] as const;
+export type AuditActorType = (typeof AUDIT_ACTOR_TYPES)[number];
+
+/**
+ * A row from `GET /audit-logs`, newest first.
+ *
+ * Tenant-scoped, so unlike `AdminAuditEntry` there is no `businessId` and no
+ * `businessName`: every row belongs to the caller's own workspace, and no
+ * platform-level entry can appear here at all.
+ */
+export interface AuditLogEntry {
+  id: string;
+  actorType: AuditActorType;
+  /** Nulled when the account behind the entry is deleted — see `actorLabel`. */
+  actorUserId: string | null;
+  actorCustomerId: string | null;
+  /** The snapshot that survives that deletion, e.g. an email address. */
+  actorLabel: string | null;
+  /** The dotted verb, e.g. `appointment.cancelled`. */
+  action: string;
+  entityType: string;
+  entityId: string | null;
+  /** Correlates the entry with one request in the server logs. */
+  requestId: string | null;
+  ipAddress: string | null;
+  createdAt: string;
+  /**
+   * Whatever the writing module recorded, already through the server's
+   * `sanitiseMetadata`. The shape varies by action, so it is read defensively
+   * rather than cast, and never used as a lookup key.
+   */
+  metadata: Record<string, unknown>;
+}
+
+/**
+ * `GET /audit-logs/{id}`. One column wider than a list row: the user agent is
+ * long, repetitive and near-useless twenty rows at a time, and is exactly what
+ * an investigation into a single entry wants.
+ */
+export interface AuditLogEntryDetail extends AuditLogEntry {
+  userAgent: string | null;
+}
+
+export interface AuditLogFilters {
+  page: number;
+  /** Exact match on the dotted verb — not a prefix search. */
+  action: string;
+  entityType: string;
+  entityId: string;
+  actorUserId: string;
+  /** Free text over the actor snapshot, the action and the entity type. */
+  search: string;
+  /** Calendar dates, `YYYY-MM-DD`, both bounds inclusive, cut into whole days. */
+  from: string;
+  to: string;
+}
+
+// --- Webhooks --------------------------------------------------------------
+
+/** Sourced from `WEBHOOK_DELIVERY_STATUSES` in models/WebhookDelivery.ts. */
+export const WEBHOOK_DELIVERY_STATUSES = [
+  'PENDING',
+  'PROCESSING',
+  'DELIVERED',
+  'FAILED',
+  'CANCELLED',
+] as const;
+export type WebhookDeliveryStatus = (typeof WEBHOOK_DELIVERY_STATUSES)[number];
+
+/** Subscribes to everything, including events added later. */
+export const WEBHOOK_WILDCARD_EVENT = '*';
+
+/**
+ * Sourced from `SUBSCRIBABLE_WEBHOOK_EVENTS` in webhooks.validation.ts.
+ *
+ * `webhook.test` is deliberately not here: a test is delivered because somebody
+ * asked for it on one endpoint, not because anybody subscribed to it, so it is
+ * sent by `POST /webhooks/{id}/test` and appears in delivery history under that
+ * name without ever being selectable.
+ */
+export const SUBSCRIBABLE_WEBHOOK_EVENTS = [
+  'appointment.created',
+  'appointment.rescheduled',
+  'appointment.cancelled',
+  'appointment.completed',
+  'appointment.no_show',
+] as const;
+export type SubscribableWebhookEvent = (typeof SUBSCRIBABLE_WEBHOOK_EVENTS)[number];
+
+/**
+ * A registered delivery target.
+ *
+ * There is no `signingSecret` field, and its absence is the contract rather
+ * than an omission: the secret is readable exactly once, in the 201 from
+ * `POST /webhooks` — see `CreatedWebhookEndpoint`. Nothing else in the API ever
+ * returns one.
+ */
+export interface WebhookEndpoint {
+  id: string;
+  url: string;
+  description: string | null;
+  /** Event names, or `['*']` for the wildcard. */
+  events: string[];
+  isActive: boolean;
+  /**
+   * Consecutive failed deliveries. Reset to zero on a success and on
+   * re-activation; at twenty the worker switches the endpoint off and stamps
+   * `disabledAt`.
+   */
+  failureCount: number;
+  /** When the endpoint was switched off, by the worker or by an operator. */
+  disabledAt: string | null;
+  lastSuccessAt: string | null;
+  lastFailureAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * The 201 body from `POST /webhooks`, and the only shape in the API that
+ * carries a signing secret. It exists in one variable on the server, in one
+ * function; no endpoint can read it back afterwards, so a client that fails to
+ * show it has cost the user the secret.
+ */
+export interface CreatedWebhookEndpoint extends WebhookEndpoint {
+  signingSecret: string;
+}
+
+export interface WebhookDeliveryRecord {
+  id: string;
+  endpointId: string;
+  event: string;
+  /** Stable across every endpoint notified of one occurrence. */
+  eventId: string;
+  status: WebhookDeliveryStatus;
+  attemptCount: number;
+  maxAttempts: number;
+  responseStatus: number | null;
+  /** Already truncated by the worker; a verbose subscriber cannot bloat this. */
+  responseBody: string | null;
+  error: string | null;
+  scheduledFor: string;
+  deliveredAt: string | null;
+  createdAt: string;
+  payload: Record<string, unknown>;
+}
+
+/** `GET /webhooks/{id}` — the endpoint plus its ten most recent deliveries. */
+export interface WebhookEndpointDetail extends WebhookEndpoint {
+  recentDeliveries: WebhookDeliveryRecord[];
+}
+
+export interface CreateWebhookRequest {
+  url: string;
+  description?: string | null;
+  /** Omitted means the column default, `['*']`. */
+  events?: string[];
+  isActive?: boolean;
+}
+
+/**
+ * The signing secret is not updatable, and its absence is the point: a
+ * caller-supplied secret would be a caller-chosen one, and rotation is a
+ * separate operation with its own overlap window. Neither is smuggled into a
+ * PATCH — rotating today means registering a second endpoint and deleting the
+ * first.
+ */
+export interface UpdateWebhookRequest {
+  url?: string;
+  description?: string | null;
+  events?: string[];
+  isActive?: boolean;
+}
+
+export interface WebhookFilters {
+  page: number;
+  /**
+   * The query parameter is the literal string `true` or `false`, not a boolean:
+   * the server spells the two out because `z.coerce.boolean()` maps `"false"`
+   * to `true` and would return exactly the rows the filter excludes.
+   */
+  isActive: 'true' | 'false' | '';
+  event: string;
+}
+
+export interface WebhookDeliveryFilters {
+  page: number;
+  status: WebhookDeliveryStatus | '';
+  event: string;
 }
