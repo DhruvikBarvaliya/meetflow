@@ -19,8 +19,70 @@ export interface ChartFrameProps {
   legend?: Array<{ label: string; colour: string }>;
   /** A screen-reader summary of what the plot shows. */
   summary?: string;
+  /**
+   * The same numbers as a table, for anyone who cannot see the plot. Omitting
+   * it means the chart's values are unreachable without sight — see the note on
+   * the component.
+   */
+  dataTable?: ChartDataTable;
   children: ReactNode;
   className?: string;
+}
+
+/**
+ * A chart's values in the one form assistive technology can actually read.
+ *
+ * Cells are pre-formatted strings rather than numbers: a table that said "1500"
+ * where the axis said "₹1,500.00" would be a different answer to the same
+ * question, and the caller already knows the units.
+ */
+export interface ChartDataTable {
+  /** What the table shows. Read out in place of the plot. */
+  caption: string;
+  /** Column headings; the first names whatever the rows are keyed by. */
+  columns: string[];
+  /** One entry per row, cells in column order. */
+  rows: Array<{ key: string; cells: string[] }>;
+}
+
+/**
+ * Visually hidden rather than behind a disclosure.
+ *
+ * A `<details>` would keep the values one keystroke away, but it also puts them
+ * behind a decision the reader has to make before they know whether it is worth
+ * making. Hidden-but-present costs sighted readers nothing and costs everyone
+ * else no interaction at all.
+ */
+function ChartDataTableView({ table }: { table: ChartDataTable }): JSX.Element {
+  return (
+    <table className="mf-sr-only">
+      <caption>{table.caption}</caption>
+      <thead>
+        <tr>
+          {table.columns.map((column) => (
+            <th key={column} scope="col">
+              {column}
+            </th>
+          ))}
+        </tr>
+      </thead>
+      <tbody>
+        {table.rows.map((row) => (
+          <tr key={row.key}>
+            {row.cells.map((cell, index) =>
+              index === 0 ? (
+                <th key={table.columns[index] ?? index} scope="row">
+                  {cell}
+                </th>
+              ) : (
+                <td key={table.columns[index] ?? index}>{cell}</td>
+              ),
+            )}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
 }
 
 /**
@@ -35,6 +97,14 @@ export interface ChartFrameProps {
  * The legend lives in the frame rather than inside the plot because a legend
  * drawn by the chart library is not reachable by keyboard and re-flows badly on
  * a phone.
+ *
+ * The plot itself is hidden from assistive technology and `dataTable` is what
+ * replaces it. A Recharts SVG left exposed is not an accessible chart: a screen
+ * reader walks it and reads out the axis ticks — "0, 5, 10, 15" and a row of
+ * dates — with not one of the plotted values among them, which is worse than
+ * silence because it sounds like data. The heatmap on the analytics page has
+ * always been a real `<table>` for the same reason; this brings the Recharts
+ * frames up to it.
  */
 export function ChartFrame({
   title,
@@ -48,6 +118,7 @@ export function ChartFrame({
   emptyMessage,
   legend,
   summary,
+  dataTable,
   children,
   className,
 }: ChartFrameProps): JSX.Element {
@@ -95,7 +166,10 @@ export function ChartFrame({
         ) : (
           <figure className="m-0" style={{ height }}>
             {summary ? <figcaption className="mf-sr-only">{summary}</figcaption> : null}
-            {children}
+            <div className="h-full" aria-hidden="true">
+              {children}
+            </div>
+            {dataTable ? <ChartDataTableView table={dataTable} /> : null}
           </figure>
         )}
       </CardBody>

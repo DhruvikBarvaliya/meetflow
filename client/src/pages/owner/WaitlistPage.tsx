@@ -46,7 +46,13 @@ import {
 import { useAuth } from '@/context/AuthContext';
 import { api, isApiError } from '@/lib/apiClient';
 import { cn } from '@/lib/cn';
-import { formatDate, formatDateLong, formatMinuteOfDay, formatTime } from '@/lib/format';
+import {
+  customerName,
+  formatDate,
+  formatDateLong,
+  formatMinuteOfDay,
+  formatTime,
+} from '@/lib/format';
 import { PERMISSIONS } from '@/lib/permissions';
 import { FormBanner } from '@/pages/auth/FormBanner';
 import type { Customer, WaitlistEntry, WaitlistStatus } from '@/types/api';
@@ -55,14 +61,28 @@ const PAGE_SIZE = 20;
 
 type WaitlistListRow = WaitlistEntry & WaitlistRow;
 
+/**
+ * Every value here is a `WaitlistStatus` the API will accept as a filter.
+ *
+ * The list used to offer "Slot held" against a `HELD` status the server has
+ * never had; the real state is `NOTIFIED` — the customer has been told about an
+ * opening and holds it until `holdExpiresAt` passes.
+ */
 const STATUS_OPTIONS: Array<{ value: WaitlistStatus | ''; label: string }> = [
   { value: '', label: 'Every status' },
   { value: 'ACTIVE', label: 'Waiting' },
-  { value: 'HELD', label: 'Slot held' },
+  { value: 'NOTIFIED', label: 'Notified' },
   { value: 'CONVERTED', label: 'Booked' },
   { value: 'CANCELLED', label: 'Cancelled' },
   { value: 'EXPIRED', label: 'Expired' },
 ];
+
+/**
+ * The two states a request can still be worked from — waiting, or notified and
+ * holding the slot it was offered. A notified entry showed no actions at all
+ * while this list named a status the server does not emit.
+ */
+const ACTIONABLE_STATUSES: readonly WaitlistStatus[] = ['ACTIVE', 'NOTIFIED'];
 
 const DAY_INITIALS = ['S', 'M', 'T', 'W', 'T', 'F', 'S'];
 
@@ -161,7 +181,7 @@ function ConvertDialog({
       open={open}
       onClose={onClose}
       title="Book this waitlist request"
-      description={`${entry.customer?.firstName ?? 'This customer'} asked for ${
+      description={`${customerName(entry.customer, 'This customer')} asked for ${
         entry.service?.name ?? 'a service'
       } between ${formatDate(entry.earliestDate, zone)} and ${formatDate(entry.latestDate, zone)}.`}
       width="lg"
@@ -389,7 +409,7 @@ function AddEntryDialog({
               placeholder={customers.length === 0 ? 'No customer matches' : 'Choose a customer'}
               options={customers.map((customer) => ({
                 value: customer.id,
-                label: `${customer.firstName} ${customer.lastName} — ${customer.email ?? 'no email'}`,
+                label: `${customerName(customer)} — ${customer.email ?? 'no email'}`,
               }))}
             />
           )}
@@ -661,11 +681,7 @@ export default function WaitlistPage(): JSX.Element {
                 {items.map((entry) => (
                   <Tr key={entry.id}>
                     <Td>
-                      <span className="font-medium text-fg">
-                        {entry.customer
-                          ? `${entry.customer.firstName} ${entry.customer.lastName}`
-                          : 'Unknown customer'}
-                      </span>
+                      <span className="font-medium text-fg">{customerName(entry.customer)}</span>
                       {entry.customer?.email ? (
                         <span className="block truncate text-xs text-fg-muted">
                           {entry.customer.email}
@@ -710,7 +726,7 @@ export default function WaitlistPage(): JSX.Element {
                       </div>
                     </Td>
                     <Td align="right">
-                      {canManage && (entry.status === 'ACTIVE' || entry.status === 'HELD') ? (
+                      {canManage && ACTIONABLE_STATUSES.includes(entry.status) ? (
                         <div className="flex flex-wrap items-center justify-end gap-1">
                           <Button
                             variant="ghost"

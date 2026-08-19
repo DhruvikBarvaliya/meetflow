@@ -52,7 +52,14 @@ import {
 } from '@/components/ui';
 import { useAuth } from '@/context/AuthContext';
 import { api, isApiError } from '@/lib/apiClient';
-import { formatDate, formatDateTime, formatNumber, formatRelative, formatTime } from '@/lib/format';
+import {
+  customerName,
+  formatDate,
+  formatDateTime,
+  formatNumber,
+  formatRelative,
+  formatTime,
+} from '@/lib/format';
 import { PERMISSIONS } from '@/lib/permissions';
 import { timezoneOptions } from '@/lib/timezones';
 import { useFormApiError } from '@/pages/auth/useFormApiError';
@@ -123,10 +130,6 @@ const FORM_FIELDS = [
   'smsEnabled',
   'marketingOptIn',
 ] as const;
-
-function fullName(customer: Customer): string {
-  return `${customer.firstName} ${customer.lastName}`.trim();
-}
 
 // ---------------------------------------------------------------------------
 // Detail
@@ -216,7 +219,7 @@ function CustomerDrawer({
     <Drawer
       open={open}
       onClose={onClose}
-      title={customer ? fullName(customer) : 'Customer'}
+      title={customer ? customerName(customer) : 'Customer'}
       description={customer?.email ?? undefined}
       width="lg"
       footer={
@@ -242,9 +245,9 @@ function CustomerDrawer({
       ) : customer ? (
         <div className="flex flex-col gap-6">
           <div className="flex items-start gap-3">
-            <Avatar name={fullName(customer)} size="lg" />
+            <Avatar name={customerName(customer)} size="lg" />
             <div className="min-w-0 flex-1">
-              <p className="text-base font-semibold text-fg">{fullName(customer)}</p>
+              <p className="text-base font-semibold text-fg">{customerName(customer)}</p>
               <div className="mt-1 flex flex-col gap-1 text-sm">
                 {customer.email ? (
                   <a
@@ -659,10 +662,10 @@ export default function CustomersPage(): JSX.Element {
                         onClick={() => setViewing(customer.id)}
                         className="flex items-center gap-3 rounded-xs text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
                       >
-                        <Avatar name={fullName(customer)} size="sm" />
+                        <Avatar name={customerName(customer)} size="sm" />
                         <span className="min-w-0">
                           <span className="block truncate font-medium text-fg">
-                            {fullName(customer)}
+                            {customerName(customer)}
                           </span>
                           <span className="block truncate text-xs text-fg-muted">
                             {customer.email ?? customer.phone ?? 'No contact details'}
@@ -700,7 +703,7 @@ export default function CustomersPage(): JSX.Element {
                               variant="ghost"
                               size="icon"
                               className="size-8"
-                              aria-label={`Edit ${fullName(customer)}`}
+                              aria-label={`Edit ${customerName(customer)}`}
                               onClick={() => setEditing(customer)}
                             >
                               <Pencil className="size-4" aria-hidden="true" />
@@ -709,7 +712,7 @@ export default function CustomersPage(): JSX.Element {
                               variant="ghost"
                               size="icon"
                               className="size-8 text-danger-text"
-                              aria-label={`Archive ${fullName(customer)}`}
+                              aria-label={`Archive ${customerName(customer)}`}
                               onClick={() => setDeleting(customer)}
                             >
                               <Trash2 className="size-4" aria-hidden="true" />
@@ -746,7 +749,7 @@ export default function CustomersPage(): JSX.Element {
           setCreating(false);
           setEditing(null);
         }}
-        title={editing ? `Edit ${fullName(editing)}` : 'Add a customer'}
+        title={editing ? `Edit ${customerName(editing)}` : 'Add a customer'}
         submitLabel={editing ? 'Save changes' : 'Add customer'}
         isSubmitting={save.isPending}
         formError={formError}
@@ -886,7 +889,7 @@ export default function CustomersPage(): JSX.Element {
         onConfirm={() => {
           if (deleting) remove.mutate(deleting.id);
         }}
-        title={deleting ? `Archive ${fullName(deleting)}?` : ''}
+        title={deleting ? `Archive ${customerName(deleting)}?` : ''}
         description="Their appointment history is kept, but they stop appearing in the address book and cannot be booked."
         confirmLabel="Archive customer"
         cancelLabel="Keep them"

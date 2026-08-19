@@ -9,7 +9,7 @@ import {
   type ReactNode,
 } from 'react';
 import { api, isApiError } from '@/lib/apiClient';
-import { isSystemRoleKey, SYSTEM_ROLE_PERMISSIONS, type PermissionKey } from '@/lib/permissions';
+import type { PermissionKey } from '@/lib/permissions';
 import { session } from '@/lib/session';
 import type {
   AuthSession,
@@ -18,7 +18,6 @@ import type {
   Membership,
   MeResponse,
   RegisterRequest,
-  Role,
   Workspace,
 } from '@/types/api';
 
@@ -58,42 +57,41 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+/**
+ * What the UI assumes before identity resolves: nothing.
+ *
+ * Empty rather than optimistic, and deliberately so. An empty set renders a
+ * bare screen for a fraction of a second and then fills in; an optimistic set
+ * renders buttons that 403 the moment anyone trusts them. The first is a UI
+ * that is behind; the second is a UI that is wrong, and being wrong about
+ * authorisation is the more expensive of the two.
+ */
 const EMPTY_PERMISSIONS: ReadonlySet<string> = new Set<string>();
 
 /**
- * Resolves the permission set for the workspace the client is acting in.
+ * The permission set for the workspace the client is acting in — read from the
+ * server, never derived here.
  *
- * See `lib/permissions.ts` for why this is a three-step fallback rather than
- * one read: the live API leaves `activeWorkspace` null on /auth/me, and the
- * only endpoint carrying real permission keys is itself permission-gated.
+ * `GET /auth/me` runs `optionalTenant`, so `activeWorkspace.permissions` is the
+ * server's own effective set for this member: the role's grants with per-member
+ * GRANT and DENY overrides already applied. This client used to fall back to a
+ * hardcoded role table when the field was null, which made those overrides
+ * invisible to the UI. It is gone; there is one answer and the server gives it.
+ *
+ * The businessId guard matters while switching workspaces: a response resolved
+ * against the previous workspace must not be read as authority over the next
+ * one. `null` passes because the server auto-selects for a caller with exactly
+ * one membership, before this provider has reconciled an id of its own.
  */
-async function resolvePermissions(me: MeResponse, businessId: string | null): Promise<string[]> {
-  if (me.activeWorkspace && me.activeWorkspace.businessId === businessId) {
-    return me.activeWorkspace.permissions;
-  }
-
-  const membership = me.memberships.find((entry) => entry.businessId === businessId);
-  if (!membership) return [];
-
-  if (isSystemRoleKey(membership.roleKey)) {
-    return SYSTEM_ROLE_PERMISSIONS[membership.roleKey];
-  }
-
-  // A workspace-defined role. Only a caller with roles:read can read its keys;
-  // anyone else gets an empty set and a deliberately bare UI rather than
-  // controls that would 403 on click.
-  try {
-    const roles = await api.get<Role[]>('/workspace/roles');
-    const role = roles.find((entry) => entry.key === membership.roleKey);
-    return role ? role.permissions.map((permission) => permission.key) : [];
-  } catch {
-    return [];
-  }
+function resolvePermissions(me: MeResponse, businessId: string | null): string[] {
+  const active = me.activeWorkspace;
+  if (!active) return [];
+  return businessId === null || active.businessId === businessId ? active.permissions : [];
 }
 
 async function fetchIdentity(businessId: string | null): Promise<Identity> {
   const me = await api.get<MeResponse>('/auth/me');
-  return { me, permissions: await resolvePermissions(me, businessId) };
+  return { me, permissions: resolvePermissions(me, businessId) };
 }
 
 /**

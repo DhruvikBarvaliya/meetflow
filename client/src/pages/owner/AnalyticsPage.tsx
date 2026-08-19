@@ -46,6 +46,7 @@ import {
   useLocationsLookup,
   useStaffLookup,
   MAX_RANGE_DAYS,
+  type ChartDataTable,
   type CustomerAnalytics,
   type DateRange,
   type LocationPerformance,
@@ -87,8 +88,21 @@ import type { AnalyticsOverview } from '@/types/api';
 /** Sunday = 0, matching the API's `weekday` field. */
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-/** Only the hours a workspace plausibly trades in; the rest is empty grid. */
-const HEATMAP_HOURS = Array.from({ length: 17 }, (_, index) => index + 6);
+/**
+ * The whole clock, not a trading window.
+ *
+ * This grid used to run 06:00–22:00 on the reasoning that the rest is empty
+ * space. It is not empty for everyone: a 24-hour clinic, an out-of-hours line
+ * or a workspace whose zone differs from the one its customers book from can
+ * have real bookings at 03:00, and those rows were dropped from the grid while
+ * still counting towards `busiest` — so they compressed the colour scale of the
+ * cells that were shown and vanished from the answer to "when are we busiest".
+ *
+ * Showing all twenty-four is the option that hides nothing. The extra columns
+ * cost a wider table that scrolls inside its own box; a missing busiest hour
+ * costs a wrong decision.
+ */
+const HEATMAP_HOURS = Array.from({ length: 24 }, (_, index) => index);
 
 /** Recharts leaves no room for a rotated label unless the axis is told. */
 const CATEGORY_AXIS_WIDTH = 132;
@@ -142,7 +156,10 @@ export default function AnalyticsPage(): JSX.Element {
   const peakTimes = useAnalytics<PeakTimeBucket[]>('peak-times', scope);
   const customers = useAnalytics<CustomerAnalytics>('customers', scope);
 
-  const currency = overview.data?.currency ?? 'INR';
+  // Held as the record itself so every tile below can tell "not arrived" from
+  // "arrived and is zero"; a `?? 0` erases that distinction.
+  const totals = overview.data;
+  const currency = totals?.currency ?? 'INR';
 
   const trendData = useMemo(
     () =>
@@ -153,7 +170,12 @@ export default function AnalyticsPage(): JSX.Element {
     [trends.data, activeTimezone],
   );
 
-  /** The heatmap needs a value for every cell; the API returns only what happened. */
+  /**
+   * The heatmap needs a value for every cell; the API returns only what
+   * happened. `busiest` is the scale's top end, and it is now taken over
+   * exactly the buckets the grid draws — which, since the grid draws all
+   * twenty-four hours, is every bucket the API sent.
+   */
   const peakGrid = useMemo(() => {
     const map = new Map<string, number>();
     let busiest = 0;
@@ -163,6 +185,66 @@ export default function AnalyticsPage(): JSX.Element {
     }
     return { map, busiest };
   }, [peakTimes.data]);
+
+  /*
+   * The plotted values as tables, for anyone reading with a screen reader.
+   *
+   * Cells are formatted here rather than in the frame so each table says what
+   * its axis says — revenue in the workspace currency, utilisation as a
+   * percentage — instead of handing over bare numbers with no units.
+   */
+  const trendTable = useMemo<ChartDataTable>(
+    () => ({
+      caption: `Bookings placed, completed and cancelled on each day from ${range.from} to ${range.to}.`,
+      columns: ['Day', 'Booked', 'Completed', 'Cancelled'],
+      rows: trendData.map((bucket) => ({
+        key: bucket.date,
+        cells: [
+          bucket.label,
+          formatNumber(bucket.bookings),
+          formatNumber(bucket.completed),
+          formatNumber(bucket.cancelled),
+        ],
+      })),
+    }),
+    [trendData, range.from, range.to],
+  );
+
+  const revenueTable = useMemo<ChartDataTable>(
+    () => ({
+      caption: `Revenue from completed appointments on each day from ${range.from} to ${range.to}.`,
+      columns: ['Day', 'Revenue'],
+      rows: trendData.map((bucket) => ({
+        key: bucket.date,
+        cells: [bucket.label, formatMoney(bucket.revenue, currency)],
+      })),
+    }),
+    [trendData, currency, range.from, range.to],
+  );
+
+  const serviceTable = useMemo<ChartDataTable>(
+    () => ({
+      caption: 'Bookings per service over the selected period.',
+      columns: ['Service', 'Bookings'],
+      rows: (servicePerformance.data ?? []).map((row) => ({
+        key: row.serviceId,
+        cells: [row.name, formatNumber(row.bookings)],
+      })),
+    }),
+    [servicePerformance.data],
+  );
+
+  const locationTable = useMemo<ChartDataTable>(
+    () => ({
+      caption: 'Utilisation per location over the selected period.',
+      columns: ['Location', 'Utilisation'],
+      rows: (locationPerformance.data ?? []).map((row) => ({
+        key: row.locationId,
+        cells: [row.name, formatRatioAsPercent(row.utilisationRate)],
+      })),
+    }),
+    [locationPerformance.data],
+  );
 
   const exportCsv = (): void => {
     void csv.download(
@@ -261,61 +343,65 @@ export default function AnalyticsPage(): JSX.Element {
           <StatTileGrid>
             <StatTile
               label="Bookings"
-              value={formatNumber(overview.data?.totalBookings ?? 0)}
+              value={totals ? formatNumber(totals.totalBookings) : '—'}
               icon={CalendarCheck2}
               isLoading={overview.isPending}
-              caption={`${formatNumber(overview.data?.confirmed ?? 0)} still to happen`}
+              caption={totals ? `${formatNumber(totals.confirmed)} still to happen` : undefined}
             />
             <StatTile
               label="Completed"
-              value={formatNumber(overview.data?.completed ?? 0)}
+              value={totals ? formatNumber(totals.completed) : '—'}
               icon={BadgeCheck}
               tone="positive"
               isLoading={overview.isPending}
-              caption={`Average length ${formatDuration(overview.data?.averageDurationMinutes ?? 0)}`}
+              caption={
+                totals
+                  ? `Average length ${formatDuration(totals.averageDurationMinutes)}`
+                  : undefined
+              }
             />
             <StatTile
               label="Cancelled"
-              value={formatNumber(overview.data?.cancelled ?? 0)}
-              detail={formatRatioAsPercent(overview.data?.cancellationRate ?? 0)}
+              value={totals ? formatNumber(totals.cancelled) : '—'}
+              detail={totals ? formatRatioAsPercent(totals.cancellationRate) : undefined}
               icon={XCircle}
-              tone={(overview.data?.cancellationRate ?? 0) > 0.2 ? 'negative' : 'default'}
+              tone={totals && totals.cancellationRate > 0.2 ? 'negative' : 'default'}
               isLoading={overview.isPending}
               caption="of every booking in the period"
             />
             <StatTile
               label="No-shows"
-              value={formatNumber(overview.data?.noShows ?? 0)}
-              detail={formatRatioAsPercent(overview.data?.noShowRate ?? 0)}
+              value={totals ? formatNumber(totals.noShows) : '—'}
+              detail={totals ? formatRatioAsPercent(totals.noShowRate) : undefined}
               icon={UserMinus}
-              tone={(overview.data?.noShowRate ?? 0) > 0.1 ? 'negative' : 'default'}
+              tone={totals && totals.noShowRate > 0.1 ? 'negative' : 'default'}
               isLoading={overview.isPending}
               caption="of everything that was due to happen"
             />
             <StatTile
               label="Revenue"
-              value={formatMoneyCompact(overview.data?.revenueAmount ?? 0, currency)}
+              value={totals ? formatMoneyCompact(totals.revenueAmount, currency) : '—'}
               icon={IndianRupee}
               isLoading={overview.isPending}
               caption="Completed appointments only"
             />
             <StatTile
               label="New customers"
-              value={formatNumber(overview.data?.newCustomers ?? 0)}
+              value={totals ? formatNumber(totals.newCustomers) : '—'}
               icon={UserPlus}
               isLoading={overview.isPending}
-              caption={`${formatNumber(overview.data?.returningCustomers ?? 0)} returning`}
+              caption={totals ? `${formatNumber(totals.returningCustomers)} returning` : undefined}
             />
             <StatTile
               label="Reschedules"
-              value={formatNumber(overview.data?.reschedules ?? 0)}
+              value={totals ? formatNumber(totals.reschedules) : '—'}
               icon={Repeat}
               isLoading={overview.isPending}
               caption="Appointments moved at least once"
             />
             <StatTile
               label="Lead time"
-              value={formatDuration((overview.data?.averageLeadTimeHours ?? 0) * 60)}
+              value={totals ? formatDuration(totals.averageLeadTimeHours * 60) : '—'}
               icon={TrendingUp}
               isLoading={overview.isPending}
               caption="Average gap between booking and appointment"
@@ -336,6 +422,7 @@ export default function AnalyticsPage(): JSX.Element {
                 colour: series.colour,
               }))}
               summary={`Daily bookings from ${range.from} to ${range.to}.`}
+              dataTable={trendTable}
               className="xl:col-span-2"
               height={280}
             >
@@ -385,6 +472,7 @@ export default function AnalyticsPage(): JSX.Element {
               isEmpty={trendData.every((bucket) => bucket.revenue === 0)}
               emptyMessage="No completed appointment carried a price in this period."
               summary={`Daily revenue from ${range.from} to ${range.to}.`}
+              dataTable={revenueTable}
             >
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={trendData} margin={{ top: 8, right: 12, bottom: 4, left: -8 }}>
@@ -434,6 +522,7 @@ export default function AnalyticsPage(): JSX.Element {
               isEmpty={(servicePerformance.data ?? []).length === 0}
               emptyMessage="No service was booked in this period."
               summary="Bookings per service."
+              dataTable={serviceTable}
             >
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart
@@ -568,6 +657,7 @@ export default function AnalyticsPage(): JSX.Element {
               isEmpty={(locationPerformance.data ?? []).length === 0}
               emptyMessage="No location took a booking in this period."
               summary="Utilisation per location."
+              dataTable={locationTable}
             >
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart
@@ -631,7 +721,7 @@ export default function AnalyticsPage(): JSX.Element {
                   }
                 >
                   <div className="mf-scroll-x">
-                    <table className="w-full min-w-[34rem] border-separate border-spacing-0.5">
+                    <table className="w-full min-w-[44rem] border-separate border-spacing-0.5">
                       <caption className="mf-sr-only">
                         Bookings by weekday and hour, in {activeTimezone}
                       </caption>
@@ -646,7 +736,8 @@ export default function AnalyticsPage(): JSX.Element {
                               scope="col"
                               className="pb-1 text-[0.625rem] font-medium tabular-nums text-fg-muted"
                             >
-                              {hour}
+                              {/* Zero-padded so midnight reads as an hour rather than an empty cell. */}
+                              {String(hour).padStart(2, '0')}
                             </th>
                           ))}
                         </tr>

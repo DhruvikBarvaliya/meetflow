@@ -92,6 +92,19 @@ export type ApiErrorCode = (typeof API_ERROR_CODES)[number];
 // Enumerations
 // ---------------------------------------------------------------------------
 
+/**
+ * Every enum below names the server file it is sourced from, and each is a
+ * `const` array rather than a bare union so a dropdown and a validator can be
+ * built from the one list instead of retyping it.
+ *
+ * That provenance is not decoration. Four of these had silently drifted from
+ * the models they mirror, and a client enum that offers a value the server's
+ * `z.enum` rejects does not fail at compile time — it fails as a 422 in front of
+ * whoever picked it. When one of these changes on the server, the named file is
+ * where to check.
+ */
+
+/** Sourced from `APPOINTMENT_STATUSES` in server/src/database/models/Appointment.ts. */
 export const APPOINTMENT_STATUSES = [
   'PENDING',
   'CONFIRMED',
@@ -104,14 +117,52 @@ export const APPOINTMENT_STATUSES = [
 ] as const;
 export type AppointmentStatus = (typeof APPOINTMENT_STATUSES)[number];
 
-export type AppointmentSource = 'PUBLIC' | 'STAFF' | 'ADMIN' | 'WAITLIST' | 'IMPORT' | 'API';
+/**
+ * Sourced from `APPOINTMENT_SOURCES` in server/src/database/models/Appointment.ts.
+ *
+ * `OWNER` is what the server stamps on a booking made from the management
+ * surface, so it is the value this client sees most; `IMPORT` was never one of
+ * them.
+ */
+export const APPOINTMENT_SOURCES = [
+  'PUBLIC',
+  'STAFF',
+  'OWNER',
+  'ADMIN',
+  'API',
+  'WAITLIST',
+] as const;
+export type AppointmentSource = (typeof APPOINTMENT_SOURCES)[number];
 
-export type AssignmentStrategy = 'ROUND_ROBIN' | 'POOLED' | 'SMART_MATCH' | 'LEAST_BUSY' | 'MANUAL';
+/**
+ * Sourced from `ASSIGNMENT_STRATEGIES` in server/src/database/models/Service.ts.
+ * `TEAM_ASSIGNMENT_STRATEGIES` in Team.ts is the same four values, which is why
+ * the services and teams forms share this list.
+ *
+ * `COLLECTIVE` books every eligible member at once, so availability becomes the
+ * intersection of their free time rather than the union.
+ */
+export const ASSIGNMENT_STRATEGIES = [
+  'ROUND_ROBIN',
+  'COLLECTIVE',
+  'POOLED',
+  'SMART_MATCH',
+] as const;
+export type AssignmentStrategy = (typeof ASSIGNMENT_STRATEGIES)[number];
 
 /** Mirrors `LOCATION_TYPES` in the server's Location model — no more, no less. */
 export type LocationType = 'PHYSICAL' | 'VIRTUAL' | 'PHONE' | 'CUSTOMER_SITE';
 
-export type ResourceType = 'ROOM' | 'EQUIPMENT' | 'DESK' | 'VEHICLE' | 'OTHER';
+/** Sourced from `RESOURCE_TYPES` in server/src/database/models/Resource.ts. */
+export const RESOURCE_TYPES = [
+  'ROOM',
+  'EQUIPMENT',
+  'VEHICLE',
+  'DESK',
+  'FACILITY',
+  'OTHER',
+] as const;
+export type ResourceType = (typeof RESOURCE_TYPES)[number];
 
 export type BookingLinkType = 'CATALOG' | 'SINGLE_SERVICE' | 'TEAM' | 'STAFF';
 
@@ -129,7 +180,21 @@ export type UserStatus = 'ACTIVE' | 'INVITED' | 'SUSPENDED' | 'DEACTIVATED';
 
 export type PlatformRole = 'USER' | 'ADMIN';
 
-export type WaitlistStatus = 'ACTIVE' | 'HELD' | 'CONVERTED' | 'CANCELLED' | 'EXPIRED';
+/**
+ * Sourced from `WAITLIST_STATUSES` in server/src/database/models/WaitlistEntry.ts.
+ *
+ * `NOTIFIED` is the state this client calls a held slot: the entry has been
+ * told about an opening and owns it until `holdExpiresAt` passes. There is no
+ * separate `HELD` status — the hold is a pair of timestamps on a notified row.
+ */
+export const WAITLIST_STATUSES = [
+  'ACTIVE',
+  'NOTIFIED',
+  'CONVERTED',
+  'EXPIRED',
+  'CANCELLED',
+] as const;
+export type WaitlistStatus = (typeof WAITLIST_STATUSES)[number];
 
 export type NotifyChannel = 'EMAIL' | 'SMS' | 'BOTH';
 
@@ -202,9 +267,16 @@ export interface Membership {
 /**
  * `GET /auth/me`.
  *
- * `activeWorkspace` is populated only when the request carried workspace
- * context. See `context/AuthContext.tsx` for how permissions are resolved when
- * it is null.
+ * The route runs `optionalTenant`, so `activeWorkspace` is populated whenever a
+ * workspace could be resolved — an `X-Business-Id` header, or a caller who
+ * belongs to exactly one workspace. `permissions` on it is the server's own
+ * effective set, with per-member GRANT and DENY overrides already applied by
+ * the same resolver `requirePermission` runs through.
+ *
+ * Null is a real answer rather than a failure: a caller with no membership, or
+ * one who belongs to several and has not named which, gets their memberships
+ * back and nothing more. See `context/AuthContext.tsx` for what the UI assumes
+ * in that window.
  */
 export interface MeResponse {
   user: Pick<AuthUser, 'id' | 'email' | 'platformRole'>;
@@ -497,7 +569,13 @@ export interface Customer {
   publicId: string;
   userId: string | null;
   firstName: string;
-  lastName: string;
+  /**
+   * Nullable: `customers.last_name` is `allowNull: true` and the create/update
+   * validators both accept it as optional. Render with `customerName` from
+   * `lib/format` — interpolating this straight into a template prints the
+   * literal string "null" next to the first name.
+   */
+  lastName: string | null;
   email: string | null;
   phone: string | null;
   timezone: string | null;
@@ -558,7 +636,8 @@ export interface Appointment {
     id: string;
     publicId: string;
     firstName: string;
-    lastName: string;
+    /** Nullable for the same reason as `Customer.lastName`. */
+    lastName: string | null;
     email?: string | null;
     phone?: string | null;
   } | null;

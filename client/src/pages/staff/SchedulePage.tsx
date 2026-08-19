@@ -37,6 +37,7 @@ import {
   formatTime,
   formatTimeRange,
   formatZoneOffset,
+  customerName,
   toIsoDate,
 } from '@/lib/format';
 import type { Appointment } from '@/types/api';
@@ -118,8 +119,10 @@ function ScheduleRow({
   checkingInId,
 }: RowProps): JSX.Element {
   const { can } = useAuth();
-  const customerName = appointment.customer
-    ? `${appointment.customer.firstName} ${appointment.customer.lastName}`.trim()
+  // `displayName`, not `customerName` — the latter is the imported helper, and
+  // a local of the same name would shadow it into a self-reference.
+  const displayName = appointment.customer
+    ? customerName(appointment.customer)
     : 'No customer on this booking';
 
   const label = appointment.title ?? appointment.service?.name ?? 'Appointment';
@@ -163,7 +166,7 @@ function ScheduleRow({
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-fg-muted">
           <span className="inline-flex items-center gap-1.5">
             <UserRound className="size-3.5 shrink-0" aria-hidden="true" />
-            <span className="truncate">{customerName}</span>
+            <span className="truncate">{displayName}</span>
           </span>
           <span className="inline-flex items-center gap-1.5">
             <Clock className="size-3.5 shrink-0" aria-hidden="true" />
@@ -188,7 +191,7 @@ function ScheduleRow({
             leadingIcon={<LogIn className="size-4" aria-hidden="true" />}
           >
             Check in
-            <span className="mf-sr-only"> {customerName}</span>
+            <span className="mf-sr-only"> {displayName}</span>
           </Button>
         </div>
       ) : null}
@@ -395,7 +398,7 @@ export default function SchedulePage(): JSX.Element {
                 {nextUp.customer ? (
                   <span className="font-normal text-fg-secondary">
                     {' '}
-                    with {nextUp.customer.firstName} {nextUp.customer.lastName}
+                    with {customerName(nextUp.customer)}
                   </span>
                 ) : null}
               </p>

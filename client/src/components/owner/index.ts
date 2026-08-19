@@ -23,6 +23,7 @@ export {
 export {
   ChartFrame,
   ChartTooltip,
+  type ChartDataTable,
   type ChartFrameProps,
   type ChartTooltipProps,
 } from './ChartFrame';

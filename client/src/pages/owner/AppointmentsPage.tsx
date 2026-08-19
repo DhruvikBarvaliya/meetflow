@@ -41,7 +41,13 @@ import {
 } from '@/components/ui';
 import { useAuth } from '@/context/AuthContext';
 import { api } from '@/lib/apiClient';
-import { formatDayLabel, formatDuration, formatMoney, formatTime } from '@/lib/format';
+import {
+  formatDayLabel,
+  formatDuration,
+  formatMoney,
+  formatTime,
+  customerName,
+} from '@/lib/format';
 import { APPOINTMENT_STATUSES, type Appointment } from '@/types/api';
 
 const PAGE_SIZE = 20;
@@ -333,7 +339,7 @@ export default function AppointmentsPage(): JSX.Element {
                     <Td>
                       {appointment.customer ? (
                         <span className="font-medium text-fg">
-                          {appointment.customer.firstName} {appointment.customer.lastName}
+                          {customerName(appointment.customer)}
                         </span>
                       ) : (
                         <span className="text-fg-muted">No customer</span>

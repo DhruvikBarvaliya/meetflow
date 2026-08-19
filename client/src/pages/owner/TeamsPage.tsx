@@ -45,7 +45,7 @@ import { api, isApiError } from '@/lib/apiClient';
 import { humanizeEnum } from '@/lib/format';
 import { PERMISSIONS } from '@/lib/permissions';
 import { useFormApiError } from '@/pages/auth/useFormApiError';
-import type { AssignmentStrategy, Team } from '@/types/api';
+import { ASSIGNMENT_STRATEGIES, type AssignmentStrategy, type Team } from '@/types/api';
 
 const PAGE_SIZE = 20;
 
@@ -54,34 +54,32 @@ const PAGE_SIZE = 20;
  *
  * The wording matters more than the enum: an owner choosing between these is
  * deciding how their staff's day fills up, and "POOLED" tells them nothing.
+ *
+ * The list itself comes from `ASSIGNMENT_STRATEGIES`, which mirrors
+ * `TEAM_ASSIGNMENT_STRATEGIES` on the server, so this file cannot go on
+ * offering a strategy the API rejects — it used to offer two.
  */
-const STRATEGIES: Array<{ value: AssignmentStrategy; label: string; hint: string }> = [
-  {
-    value: 'ROUND_ROBIN',
+const STRATEGY_COPY: Record<AssignmentStrategy, { label: string; hint: string }> = {
+  ROUND_ROBIN: {
     label: 'Round robin',
     hint: 'Takes turns, weighted — the member who went longest without a booking is next.',
   },
-  {
-    value: 'POOLED',
+  COLLECTIVE: {
+    label: 'Collective',
+    hint: 'Books the whole team together, so a slot has to suit everyone at once.',
+  },
+  POOLED: {
     label: 'Pooled',
     hint: 'Anyone free may take it; the first available slot wins.',
   },
-  {
-    value: 'SMART_MATCH',
+  SMART_MATCH: {
     label: 'Smart match',
     hint: "Scores each member on fit, load and the customer's history.",
   },
-  {
-    value: 'LEAST_BUSY',
-    label: 'Least busy',
-    hint: 'Goes to whoever has the lightest day.',
-  },
-  {
-    value: 'MANUAL',
-    label: 'Manual',
-    hint: 'Nobody is assigned automatically; the front desk chooses.',
-  },
-];
+};
+
+const STRATEGIES: Array<{ value: AssignmentStrategy; label: string; hint: string }> =
+  ASSIGNMENT_STRATEGIES.map((value) => ({ value, ...STRATEGY_COPY[value] }));
 
 const teamSchema = z.object({
   name: z.string().trim().min(1, 'A team name is required.').max(120),
@@ -90,7 +88,7 @@ const teamSchema = z.object({
     .trim()
     .max(1000)
     .transform((value) => (value === '' ? null : value)),
-  assignmentStrategy: z.enum(['ROUND_ROBIN', 'POOLED', 'SMART_MATCH', 'LEAST_BUSY', 'MANUAL']),
+  assignmentStrategy: z.enum(ASSIGNMENT_STRATEGIES),
   isActive: z.boolean(),
 });
 

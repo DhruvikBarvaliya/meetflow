@@ -5,10 +5,12 @@
  * bearer token — so these specs also stand as a check that the page works for
  * someone who has never seen the booking flow.
  *
- * A workspace's default reschedule deadline is 24 hours, so a booking made for
- * tomorrow morning is deliberately *not* movable. Both sides of that rule are
- * covered: the action working when policy allows it, and the page explaining
- * itself when policy does not.
+ * Both sides of the change deadline are covered: the action working when policy
+ * allows it, and the page explaining itself when policy does not. The refusing
+ * case sets the deadline explicitly rather than relying on a booking's distance
+ * from now — the slot search starts from tomorrow, so "tomorrow morning is
+ * inside a 24-hour window" is true in the evening and false at breakfast, and
+ * the assertion used to flip with the clock.
  *
  * Availability is published per booking link and an appointment does not carry
  * the slug it was booked through, so the page can only show a real slot grid
@@ -17,10 +19,12 @@
 import { expect, test } from '@playwright/test';
 import {
   bookPublicSlot,
+  DEADLINE_COVERS_EVERYTHING,
   createBookableWorkspace,
   fetchPublicSlots,
   uniqueEmail,
   type OwnerFixture,
+  setChangeDeadlines,
 } from '../fixtures/api';
 
 let workspace: OwnerFixture;
@@ -91,14 +95,33 @@ test('without the link, the customer names a date and time instead', async ({ pa
 });
 
 test('a booking inside the deadline says why it cannot be moved', async ({ page }) => {
-  // Inside the workspace's 24-hour reschedule deadline by construction.
-  const publicId = await bookOne(0);
+  /*
+   * Set, not assumed. The slot search starts from tomorrow, so "the first
+   * opening" is inside a 24-hour deadline only when the test happens to run
+   * late enough in the day — this assertion inverted itself overnight once
+   * already. Widening the deadline past any opening the search can return puts
+   * the booking inside the window by construction.
+   *
+   * Restored afterwards: this file shares one workspace across its tests, and
+   * the ones below deliberately expect a change to be *allowed*.
+   */
+  await setChangeDeadlines(workspace, {
+    reschedule: DEADLINE_COVERS_EVERYTHING,
+    cancellation: DEADLINE_COVERS_EVERYTHING,
+  });
 
-  await page.goto(`/appointments/${publicId}`);
-  await expect(page.getByRole('button', { name: /reschedule/i })).toBeDisabled();
+  try {
+    const publicId = await bookOne(0);
 
-  // A disabled control with no explanation is a dead end, so the rule is named.
-  await expect(page.getByText(/only be moved online more than 24 hr in advance/i)).toBeVisible();
+    await page.goto(`/appointments/${publicId}`);
+    await expect(page.getByRole('button', { name: /reschedule/i })).toBeDisabled();
+
+    // A disabled control with no explanation is a dead end, so the rule is
+    // named. Which deadline it names is the server suite's business.
+    await expect(page.getByText(/only be moved online more than .+ in advance/i)).toBeVisible();
+  } finally {
+    await setChangeDeadlines(workspace, { reschedule: 1440, cancellation: 1440 });
+  }
 });
 
 test('the customer cancels, and the page reflects it', async ({ page }) => {

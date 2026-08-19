@@ -50,6 +50,7 @@ import {
   formatTime,
   formatTimeRange,
   formatZoneOffset,
+  customerName,
   humanizeEnum,
 } from '@/lib/format';
 import { PERMISSIONS } from '@/lib/permissions';
@@ -211,10 +212,12 @@ export default function AppointmentDetailPage(): JSX.Element {
     detail.participants.find((entry) => entry.role === 'ORGANIZER')?.customer ??
     detail.participants[0]?.customer ??
     null;
-  const customerName = contact
-    ? `${contact.firstName} ${contact.lastName}`.trim()
+  // Both branches read a Customer, whose `lastName` is nullable — hence the
+  // shared helper rather than a template literal, which renders "Jane null".
+  const displayName = contact
+    ? customerName(contact)
     : appointment.customer
-      ? `${appointment.customer.firstName} ${appointment.customer.lastName}`.trim()
+      ? customerName(appointment.customer)
       : null;
 
   const answers = Object.entries(appointment.answers);
@@ -321,10 +324,10 @@ export default function AppointmentDetailPage(): JSX.Element {
         <Card>
           <CardHeader as="h2" title="Who you are seeing" />
           <CardBody>
-            {customerName ? (
+            {displayName ? (
               <dl className="flex flex-col gap-4">
                 <DetailRow icon={<UserRound className="size-4" />} label="Name">
-                  {customerName}
+                  {displayName}
                 </DetailRow>
                 {contact?.email ? (
                   <DetailRow icon={<Mail className="size-4" />} label="Email">

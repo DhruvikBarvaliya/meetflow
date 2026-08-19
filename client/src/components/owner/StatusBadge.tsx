@@ -44,9 +44,14 @@ export function AppointmentStatusBadge({
   );
 }
 
+/**
+ * `NOTIFIED` carries the warning tone because it is the only waitlist state with
+ * a clock running against it: the entry holds the slot it was offered until
+ * `holdExpiresAt` passes, and nobody else can be given that time meanwhile.
+ */
 const WAITLIST_TONES: Record<WaitlistStatus, BadgeTone> = {
   ACTIVE: 'info',
-  HELD: 'warning',
+  NOTIFIED: 'warning',
   CONVERTED: 'success',
   CANCELLED: 'neutral',
   EXPIRED: 'neutral',

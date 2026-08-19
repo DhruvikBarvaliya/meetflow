@@ -305,6 +305,27 @@ export function formatRatioAsPercent(ratio: number, fractionDigits = 1, locale =
   }).format(ratio);
 }
 
+/**
+ * A customer's display name, built the way the server's `fullName` getter does.
+ *
+ * `lastName` is nullable throughout the API, so the obvious
+ * `` `${firstName} ${lastName}` `` prints "Jane null" for every mononymous
+ * customer and "Jane " for anyone whose surname is an empty string. Both parts
+ * are filtered before joining, and a record with nothing usable falls back to a
+ * placeholder rather than rendering an empty cell that looks like a broken row.
+ */
+export function customerName(
+  customer: { firstName?: string | null; lastName?: string | null } | null | undefined,
+  fallback = 'Unknown customer',
+): string {
+  if (!customer) return fallback;
+  const name = [customer.firstName, customer.lastName]
+    .map((part) => (part ?? '').trim())
+    .filter((part) => part.length > 0)
+    .join(' ');
+  return name === '' ? fallback : name;
+}
+
 /** `Priya Shah` → `PS`. Two letters at most, so an avatar never overflows. */
 export function initialsOf(...parts: Array<string | null | undefined>): string {
   const letters = parts

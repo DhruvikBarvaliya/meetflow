@@ -1,32 +1,24 @@
-import type { SystemRoleKey } from '@/types/api';
+import { SYSTEM_ROLE_KEYS, type SystemRoleKey } from '@/types/api';
 
 /**
- * A mirror of the server's permission catalogue and built-in role templates.
+ * The permission *vocabulary* — the key strings the server and this client both
+ * name — and nothing about who holds them.
  *
- * Why this file exists, honestly stated:
+ * There used to be a role-to-permissions table here as well, and deleting it
+ * was the point of this file's last change. `GET /auth/me` runs `optionalTenant`
+ * and returns `activeWorkspace.permissions`: the role's grants with per-member
+ * GRANT and DENY overrides already applied, resolved by the same code every
+ * `requirePermission` check runs through. A second table on the client is a
+ * second answer to a question that already has one, and it could not see
+ * overrides at all — so it showed members controls the server would refuse and
+ * hid ones it would allow.
  *
- * `GET /api/v1/auth/me` is mounted on the unauthenticated `/auth` router, which
- * runs `authenticate` but not `requireTenant`. Its `activeWorkspace` field is
- * therefore always `null` in practice, even when the request carries a valid
- * `X-Business-Id` — verified against the running API. The only endpoint that
- * exposes real permission keys is `GET /workspace/roles`, which itself requires
- * `roles:read` and so is unavailable to exactly the roles that need the
- * narrowest UI.
+ * What remains is safe to duplicate because it is not an answer: `PERMISSIONS`
+ * is a set of names, and a name that drifts fails loudly as a key nothing
+ * matches rather than quietly as the wrong access decision.
  *
- * So `can()` resolves permissions in this order (see AuthContext):
- *   1. `activeWorkspace.permissions` when the API does return it,
- *   2. the template below for the four seeded system roles,
- *   3. `GET /workspace/roles` for a custom role, if the caller may read it.
- *
- * Two consequences worth being explicit about:
- *   - This is a *display* concern only. The server authorises every request
- *     independently; nothing here can grant access, only hide or show controls.
- *   - Per-member GRANT/DENY overrides are invisible to step 2. A member with an
- *     override may see a control they cannot use (the API answers 403, which the
- *     UI surfaces) or miss one they could. Step 1 fixes this the moment the API
- *     populates `activeWorkspace`.
- *
- * Kept byte-identical to `server/src/modules/auth/permissions.ts`.
+ * This is still a *display* concern only. Nothing here grants access; the
+ * server authorises every request independently.
  */
 
 export const PERMISSIONS = {
@@ -99,107 +91,6 @@ export const PERMISSIONS = {
 
 export type PermissionKey = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
 
-export const ALL_PERMISSIONS: PermissionKey[] = Object.values(PERMISSIONS);
-
-const MANAGER_PERMISSIONS: PermissionKey[] = [
-  PERMISSIONS.WORKSPACE_READ,
-  PERMISSIONS.WORKSPACE_UPDATE,
-  PERMISSIONS.WORKSPACE_SETTINGS_MANAGE,
-  PERMISSIONS.MEMBERS_READ,
-  PERMISSIONS.MEMBERS_INVITE,
-  PERMISSIONS.MEMBERS_UPDATE,
-  PERMISSIONS.ROLES_READ,
-  PERMISSIONS.LOCATIONS_READ,
-  PERMISSIONS.LOCATIONS_MANAGE,
-  PERMISSIONS.TEAMS_READ,
-  PERMISSIONS.TEAMS_MANAGE,
-  PERMISSIONS.STAFF_READ,
-  PERMISSIONS.STAFF_MANAGE,
-  PERMISSIONS.SERVICES_READ,
-  PERMISSIONS.SERVICES_MANAGE,
-  PERMISSIONS.RESOURCES_READ,
-  PERMISSIONS.RESOURCES_MANAGE,
-  PERMISSIONS.AVAILABILITY_READ,
-  PERMISSIONS.AVAILABILITY_MANAGE,
-  PERMISSIONS.AVAILABILITY_MANAGE_OWN,
-  PERMISSIONS.HOLIDAYS_MANAGE,
-  PERMISSIONS.BLACKOUTS_MANAGE,
-  PERMISSIONS.CUSTOMERS_READ,
-  PERMISSIONS.CUSTOMERS_MANAGE,
-  PERMISSIONS.CUSTOMERS_NOTES_MANAGE,
-  PERMISSIONS.APPOINTMENTS_READ,
-  PERMISSIONS.APPOINTMENTS_CREATE,
-  PERMISSIONS.APPOINTMENTS_UPDATE,
-  PERMISSIONS.APPOINTMENTS_RESCHEDULE,
-  PERMISSIONS.APPOINTMENTS_CANCEL,
-  PERMISSIONS.APPOINTMENTS_COMPLETE,
-  PERMISSIONS.APPOINTMENTS_NO_SHOW,
-  PERMISSIONS.APPOINTMENTS_APPROVE,
-  PERMISSIONS.APPOINTMENTS_NOTES_MANAGE,
-  PERMISSIONS.BOOKING_LINKS_READ,
-  PERMISSIONS.BOOKING_LINKS_MANAGE,
-  PERMISSIONS.WAITLIST_READ,
-  PERMISSIONS.WAITLIST_MANAGE,
-  PERMISSIONS.NOTIFICATIONS_READ,
-  PERMISSIONS.NOTIFICATIONS_MANAGE,
-  PERMISSIONS.TEMPLATES_MANAGE,
-  PERMISSIONS.AUTOMATIONS_READ,
-  PERMISSIONS.AUTOMATIONS_MANAGE,
-  PERMISSIONS.ANALYTICS_READ,
-  PERMISSIONS.REPORTS_READ,
-  PERMISSIONS.REPORTS_EXPORT,
-  PERMISSIONS.AUDIT_READ,
-  PERMISSIONS.WEBHOOKS_READ,
-];
-
-const RECEPTIONIST_PERMISSIONS: PermissionKey[] = [
-  PERMISSIONS.WORKSPACE_READ,
-  PERMISSIONS.LOCATIONS_READ,
-  PERMISSIONS.TEAMS_READ,
-  PERMISSIONS.STAFF_READ,
-  PERMISSIONS.SERVICES_READ,
-  PERMISSIONS.RESOURCES_READ,
-  PERMISSIONS.AVAILABILITY_READ,
-  PERMISSIONS.CUSTOMERS_READ,
-  PERMISSIONS.CUSTOMERS_MANAGE,
-  PERMISSIONS.CUSTOMERS_NOTES_MANAGE,
-  PERMISSIONS.APPOINTMENTS_READ,
-  PERMISSIONS.APPOINTMENTS_CREATE,
-  PERMISSIONS.APPOINTMENTS_UPDATE,
-  PERMISSIONS.APPOINTMENTS_RESCHEDULE,
-  PERMISSIONS.APPOINTMENTS_CANCEL,
-  PERMISSIONS.APPOINTMENTS_COMPLETE,
-  PERMISSIONS.APPOINTMENTS_NO_SHOW,
-  PERMISSIONS.APPOINTMENTS_NOTES_MANAGE,
-  PERMISSIONS.BOOKING_LINKS_READ,
-  PERMISSIONS.WAITLIST_READ,
-  PERMISSIONS.WAITLIST_MANAGE,
-  PERMISSIONS.NOTIFICATIONS_READ,
-];
-
-const STAFF_PERMISSIONS: PermissionKey[] = [
-  PERMISSIONS.WORKSPACE_READ,
-  PERMISSIONS.LOCATIONS_READ,
-  PERMISSIONS.SERVICES_READ,
-  PERMISSIONS.STAFF_READ,
-  PERMISSIONS.AVAILABILITY_READ,
-  PERMISSIONS.AVAILABILITY_MANAGE_OWN,
-  PERMISSIONS.CUSTOMERS_READ_ASSIGNED,
-  PERMISSIONS.APPOINTMENTS_READ_OWN,
-  PERMISSIONS.APPOINTMENTS_RESCHEDULE,
-  PERMISSIONS.APPOINTMENTS_CANCEL,
-  PERMISSIONS.APPOINTMENTS_COMPLETE,
-  PERMISSIONS.APPOINTMENTS_NO_SHOW,
-  PERMISSIONS.APPOINTMENTS_NOTES_MANAGE,
-];
-
-export const SYSTEM_ROLE_PERMISSIONS: Record<SystemRoleKey, PermissionKey[]> = {
-  BUSINESS_OWNER: ALL_PERMISSIONS,
-  MANAGER: MANAGER_PERMISSIONS,
-  RECEPTIONIST: RECEPTIONIST_PERMISSIONS,
-  STAFF: STAFF_PERMISSIONS,
-};
-
 export const SYSTEM_ROLE_LABELS: Record<SystemRoleKey, string> = {
   BUSINESS_OWNER: 'Business Owner',
   MANAGER: 'Manager',
@@ -207,8 +98,9 @@ export const SYSTEM_ROLE_LABELS: Record<SystemRoleKey, string> = {
   STAFF: 'Staff',
 };
 
+/** Whether a workspace role is one of the four seeded templates or a custom one. */
 export function isSystemRoleKey(key: string): key is SystemRoleKey {
-  return key in SYSTEM_ROLE_PERMISSIONS;
+  return (SYSTEM_ROLE_KEYS as readonly string[]).includes(key);
 }
 
 /**

@@ -55,17 +55,33 @@ import { api, isApiError } from '@/lib/apiClient';
 import { formatDuration, formatMoney } from '@/lib/format';
 import { PERMISSIONS } from '@/lib/permissions';
 import { useFormApiError } from '@/pages/auth/useFormApiError';
-import type { AssignmentStrategy, Service, ServiceCategory } from '@/types/api';
+import {
+  ASSIGNMENT_STRATEGIES,
+  type AssignmentStrategy,
+  type Service,
+  type ServiceCategory,
+} from '@/types/api';
 
 const PAGE_SIZE = 20;
 
-const STRATEGIES: Array<{ value: AssignmentStrategy; label: string }> = [
-  { value: 'SMART_MATCH', label: 'Smart match' },
-  { value: 'ROUND_ROBIN', label: 'Round robin' },
-  { value: 'POOLED', label: 'Pooled' },
-  { value: 'LEAST_BUSY', label: 'Least busy' },
-  { value: 'MANUAL', label: 'Manual' },
-];
+/**
+ * Wording for each strategy, labelled here but never *listed* here.
+ *
+ * The values come from `ASSIGNMENT_STRATEGIES`, so a strategy added to or
+ * dropped from the server model is a type error in this file rather than a 422
+ * in front of whoever picked it. This dropdown used to offer `LEAST_BUSY` and
+ * `MANUAL`, neither of which the server has ever accepted.
+ */
+const STRATEGY_LABELS: Record<AssignmentStrategy, string> = {
+  SMART_MATCH: 'Smart match',
+  ROUND_ROBIN: 'Round robin',
+  POOLED: 'Pooled',
+  COLLECTIVE: 'Collective',
+};
+
+const STRATEGIES: Array<{ value: AssignmentStrategy; label: string }> = ASSIGNMENT_STRATEGIES.map(
+  (value) => ({ value, label: STRATEGY_LABELS[value] }),
+);
 
 /**
  * `''` means "inherit the workspace default" for every override on this form.
@@ -106,7 +122,7 @@ const serviceSchema = z.object({
   maxHorizonDays: inheritableNumber(730, 'Use 1–730 days, or leave blank to inherit.'),
   slotIntervalMinutes: inheritableNumber(480, 'Use 1–480 minutes, or leave blank to inherit.'),
   maxPerCustomerPerDay: inheritableNumber(100, 'Use 1–100, or leave blank for no limit.'),
-  assignmentStrategy: z.enum(['SMART_MATCH', 'ROUND_ROBIN', 'POOLED', 'LEAST_BUSY', 'MANUAL']),
+  assignmentStrategy: z.enum(ASSIGNMENT_STRATEGIES),
   color: z
     .string()
     .trim()
@@ -1134,7 +1150,7 @@ export default function ServicesPage(): JSX.Element {
 
         <Field
           label="Assignment strategy"
-          hint="How a provider is chosen when the customer does not pick one."
+          hint="How a provider is chosen when the customer does not pick one. Collective is the exception: it books every eligible provider at once."
           error={form.formState.errors.assignmentStrategy?.message}
         >
           {(field) => (

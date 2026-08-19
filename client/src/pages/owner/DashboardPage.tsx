@@ -8,7 +8,7 @@ import {
   Contact,
   IndianRupee,
   Link2,
-  Sparkles,
+  ShieldX,
   UserMinus,
   XCircle,
 } from 'lucide-react';
@@ -42,6 +42,7 @@ import {
   useAxisStyle,
   useChartTheme,
   useLiveRefresh,
+  type ChartDataTable,
   type ServicePerformance,
   type StaffPerformance,
   type TrendBucket,
@@ -51,6 +52,7 @@ import { useAuth } from '@/context/AuthContext';
 import { SOCKET_EVENTS } from '@/context/SocketContext';
 import { api } from '@/lib/apiClient';
 import {
+  customerName,
   formatDate,
   formatDuration,
   formatMoneyCompact,
@@ -110,6 +112,35 @@ const QUICK_ACTIONS: QuickAction[] = [
 ];
 
 /**
+ * What stands in for a panel this caller's role cannot see.
+ *
+ * The same refusal `ProtectedRoute` gives a whole page, at panel scale, and for
+ * the same reason: an area that is missing because of a permission is not an
+ * error and not an empty result, and it must not be left to look like either.
+ * The alternative the dashboard used to ship was an endless skeleton, which
+ * makes a promise about the next few seconds that will never be kept.
+ */
+function AreaUnavailable({
+  title,
+  description,
+  className,
+}: {
+  title: string;
+  description: string;
+  className?: string;
+}): JSX.Element {
+  return (
+    <Card className={className}>
+      <EmptyState
+        icon={<ShieldX className="size-6" aria-hidden="true" />}
+        title={title}
+        description={description}
+      />
+    </Card>
+  );
+}
+
+/**
  * The first screen after signing in.
  *
  * Everything on it is a real figure from `/api/v1/analytics/*` or a real row
@@ -140,6 +171,22 @@ export default function DashboardPage(): JSX.Element {
   const now = DateTime.now().setZone(activeTimezone).startOf('hour');
   const todayIso = now.toISODate() ?? '';
 
+  /*
+   * These two flags decide what is *rendered*, not merely what is fetched.
+   *
+   * Under TanStack Query v5 a disabled query is not "idle" — it reports
+   * `isPending: true` and `fetchStatus: 'idle'`, because pending means "no data
+   * yet" and says nothing about whether a request is in flight. Feeding that
+   * straight into a skeleton, as this page once did, leaves a Staff user
+   * watching Utilisation, Cancellations, No-shows, Revenue and both charts
+   * shimmer for as long as they care to wait. There is no future in which the
+   * data arrives, so the honest thing is not to draw the panel at all and to
+   * say which permission its absence turns on.
+   *
+   * Anyone reintroducing an `enabled:` flag here: guard the render on the same
+   * condition, or use `isLoading` (which is `isPending && isFetching`) rather
+   * than `isPending`.
+   */
   const canReadDiary = can(PERMISSIONS.APPOINTMENTS_READ) || can(PERMISSIONS.APPOINTMENTS_READ_OWN);
   const canReadAnalytics = can(PERMISSIONS.ANALYTICS_READ);
 
@@ -223,7 +270,13 @@ export default function DashboardPage(): JSX.Element {
 
   // --- Derived -------------------------------------------------------------
 
-  const todayAppointments = todayQuery.data?.items ?? [];
+  // Held as the raw page/record rather than a defaulted value: every tile below
+  // distinguishes "not arrived" from "arrived and is zero", and it cannot do
+  // that against a `?? 0`.
+  const today = todayQuery.data;
+  const overview = overviewQuery.data;
+
+  const todayAppointments = today?.items ?? [];
 
   /**
    * What is left of today.
@@ -270,7 +323,33 @@ export default function DashboardPage(): JSX.Element {
 
   const topServices = useMemo(() => (servicesQuery.data ?? []).slice(0, 6), [servicesQuery.data]);
 
-  const currency = overviewQuery.data?.currency ?? 'INR';
+  const currency = overview?.currency ?? 'INR';
+
+  // The plotted numbers, in the form a screen reader can actually read. See the
+  // note on ChartFrame for why the SVG alone is not enough.
+  const trendTable = useMemo<ChartDataTable>(
+    () => ({
+      caption: `Bookings placed and completed on each of the last ${TREND_DAYS} days.`,
+      columns: ['Day', 'Booked', 'Completed'],
+      rows: trendData.map((bucket) => ({
+        key: bucket.date,
+        cells: [bucket.label, formatNumber(bucket.bookings), formatNumber(bucket.completed)],
+      })),
+    }),
+    [trendData],
+  );
+
+  const servicesTable = useMemo<ChartDataTable>(
+    () => ({
+      caption: `Bookings per service over the last ${TREND_DAYS} days.`,
+      columns: ['Service', 'Bookings'],
+      rows: topServices.map((row) => ({
+        key: row.serviceId,
+        cells: [row.name, formatNumber(row.bookings)],
+      })),
+    }),
+    [topServices],
+  );
 
   return (
     <>
@@ -286,68 +365,88 @@ export default function DashboardPage(): JSX.Element {
         }
       />
 
-      <StatTileGrid columns={3}>
-        <StatTile
-          label="On today"
-          value={formatNumber(todayQuery.data?.meta.totalItems ?? 0)}
-          icon={CalendarCheck2}
-          isLoading={todayQuery.isPending}
-          caption={
-            canReadDiary
-              ? `${formatNumber(nextUp.length)} still to come`
-              : 'Your role cannot read the diary'
-          }
-        />
-        <StatTile
-          label={`Next ${UPCOMING_DAYS} days`}
-          value={formatNumber(upcomingQuery.data?.meta.totalItems ?? 0)}
-          icon={CalendarClock}
-          isLoading={upcomingQuery.isPending}
-          caption="Confirmed appointments ahead"
-        />
-        <StatTile
-          label="Utilisation"
-          value={utilisation.rate === null ? '—' : formatRatioAsPercent(utilisation.rate)}
-          icon={Clock3}
-          isLoading={staffQuery.isPending}
-          caption={
-            utilisation.rate === null
-              ? 'Nobody was rostered in the last 30 days'
-              : `${formatDuration(utilisation.booked)} booked of ${formatDuration(
-                  utilisation.rostered,
-                )} rostered`
-          }
-        />
-        <StatTile
-          label="Cancellations"
-          value={formatNumber(overviewQuery.data?.cancelled ?? 0)}
-          detail={formatRatioAsPercent(overviewQuery.data?.cancellationRate ?? 0)}
-          icon={XCircle}
-          tone={(overviewQuery.data?.cancellationRate ?? 0) > 0.2 ? 'negative' : 'default'}
-          isLoading={overviewQuery.isPending}
-          caption={`In the last ${TREND_DAYS} days`}
-        />
-        <StatTile
-          label="No-shows"
-          value={formatNumber(overviewQuery.data?.noShows ?? 0)}
-          detail={formatRatioAsPercent(overviewQuery.data?.noShowRate ?? 0)}
-          icon={UserMinus}
-          tone={(overviewQuery.data?.noShowRate ?? 0) > 0.1 ? 'negative' : 'default'}
-          isLoading={overviewQuery.isPending}
-          caption={`Of everything due in the last ${TREND_DAYS} days`}
-        />
-        <StatTile
-          label="Revenue"
-          value={formatMoneyCompact(overviewQuery.data?.revenueAmount ?? 0, currency)}
-          icon={IndianRupee}
-          isLoading={overviewQuery.isPending}
-          caption={`From ${formatNumber(
-            overviewQuery.data?.completed ?? 0,
-          )} completed appointments in the last ${TREND_DAYS} days`}
-        />
-      </StatTileGrid>
+      {canReadDiary || canReadAnalytics ? (
+        <StatTileGrid columns={3}>
+          {canReadDiary ? (
+            <>
+              <StatTile
+                label="On today"
+                value={today ? formatNumber(today.meta.totalItems) : '—'}
+                icon={CalendarCheck2}
+                isLoading={todayQuery.isPending}
+                caption={today ? `${formatNumber(nextUp.length)} still to come` : undefined}
+              />
+              <StatTile
+                label={`Next ${UPCOMING_DAYS} days`}
+                value={upcomingQuery.data ? formatNumber(upcomingQuery.data.meta.totalItems) : '—'}
+                icon={CalendarClock}
+                isLoading={upcomingQuery.isPending}
+                caption="Confirmed appointments ahead"
+              />
+            </>
+          ) : null}
 
-      <div className="grid gap-4">
+          {canReadAnalytics ? (
+            <>
+              <StatTile
+                label="Utilisation"
+                value={
+                  staffQuery.data && utilisation.rate !== null
+                    ? formatRatioAsPercent(utilisation.rate)
+                    : '—'
+                }
+                icon={Clock3}
+                isLoading={staffQuery.isPending}
+                caption={
+                  // Withheld until the rota is known: "nobody was rostered" is a
+                  // finding, and printing it over a request still in flight
+                  // states it as fact.
+                  !staffQuery.data
+                    ? undefined
+                    : utilisation.rate === null
+                      ? `Nobody was rostered in the last ${TREND_DAYS} days`
+                      : `${formatDuration(utilisation.booked)} booked of ${formatDuration(
+                          utilisation.rostered,
+                        )} rostered`
+                }
+              />
+              <StatTile
+                label="Cancellations"
+                value={overview ? formatNumber(overview.cancelled) : '—'}
+                detail={overview ? formatRatioAsPercent(overview.cancellationRate) : undefined}
+                icon={XCircle}
+                tone={overview && overview.cancellationRate > 0.2 ? 'negative' : 'default'}
+                isLoading={overviewQuery.isPending}
+                caption={`In the last ${TREND_DAYS} days`}
+              />
+              <StatTile
+                label="No-shows"
+                value={overview ? formatNumber(overview.noShows) : '—'}
+                detail={overview ? formatRatioAsPercent(overview.noShowRate) : undefined}
+                icon={UserMinus}
+                tone={overview && overview.noShowRate > 0.1 ? 'negative' : 'default'}
+                isLoading={overviewQuery.isPending}
+                caption={`Of everything due in the last ${TREND_DAYS} days`}
+              />
+              <StatTile
+                label="Revenue"
+                value={overview ? formatMoneyCompact(overview.revenueAmount, currency) : '—'}
+                icon={IndianRupee}
+                isLoading={overviewQuery.isPending}
+                caption={
+                  overview
+                    ? `From ${formatNumber(
+                        overview.completed,
+                      )} completed appointments in the last ${TREND_DAYS} days`
+                    : undefined
+                }
+              />
+            </>
+          ) : null}
+        </StatTileGrid>
+      ) : null}
+
+      {canReadAnalytics ? (
         <ChartFrame
           title="Booking trend"
           description={`Bookings placed and completed over the last ${TREND_DAYS} days.`}
@@ -362,6 +461,7 @@ export default function DashboardPage(): JSX.Element {
             { label: 'Completed', colour: seriesColour(chart, 1) },
           ]}
           summary={`Daily bookings and completions over the last ${TREND_DAYS} days.`}
+          dataTable={trendTable}
           actions={
             <Link to="/app/analytics" className={buttonStyles('ghost', 'sm')}>
               Full analytics
@@ -410,138 +510,146 @@ export default function DashboardPage(): JSX.Element {
             </LineChart>
           </ResponsiveContainer>
         </ChartFrame>
-      </div>
+      ) : null}
 
       <div className="grid gap-4 xl:grid-cols-3">
-        <Card className="xl:col-span-2">
-          <CardHeader
-            as="h2"
-            title="Today"
-            description={
-              todayAppointments.length > 0
-                ? `${formatNumber(todayAppointments.length)} in the diary, ${formatNumber(
-                    nextUp.length,
-                  )} still to come.`
-                : undefined
-            }
-            actions={
-              <Link
-                to={`/app/appointments?from=${todayIso}&to=${todayIso}`}
-                className={buttonStyles('ghost', 'sm')}
-              >
-                Open the diary
-              </Link>
-            }
-          />
-          <DataState
-            isPending={todayQuery.isPending}
-            isError={todayQuery.isError}
-            error={todayQuery.error}
-            onRetry={() => void todayQuery.refetch()}
-            isEmpty={todayAppointments.length === 0}
-            rows={4}
-            columns={4}
-            empty={
-              <EmptyState
-                icon={<CalendarDays className="size-6" aria-hidden="true" />}
-                title="Nothing booked today"
-                description="A clear day. Share a booking link if you would rather it were not."
-                action={
-                  <PermissionGate permission={PERMISSIONS.BOOKING_LINKS_READ}>
-                    <Link to="/app/booking-links" className={buttonStyles('secondary', 'md')}>
-                      Booking links
-                    </Link>
-                  </PermissionGate>
-                }
-              />
-            }
-          >
-            <ul className="divide-y divide-border">
-              {todayAppointments.map((appointment) => (
-                <li key={appointment.id} className="flex flex-wrap items-center gap-3 px-5 py-3">
-                  <span className="w-16 shrink-0 text-sm font-medium tabular-nums text-fg">
-                    {formatTime(appointment.startsAt, activeTimezone)}
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium text-fg">
-                      {appointment.service?.name ?? 'Appointment'}
-                    </span>
-                    <span className="block truncate text-xs text-fg-muted">
-                      {appointment.customer
-                        ? `${appointment.customer.firstName} ${appointment.customer.lastName}`
-                        : 'No customer'}
-                      {appointment.staffProfile ? ` · ${appointment.staffProfile.displayName}` : ''}
-                    </span>
-                  </span>
-                  <AppointmentStatusBadge status={appointment.status} />
-                  <AppointmentActions
-                    appointment={appointment}
-                    variant="menu"
-                    onCompleted={refresh}
-                  />
-                </li>
-              ))}
-            </ul>
-          </DataState>
-        </Card>
-
-        <div className="flex flex-col gap-4">
-          <Card>
+        {canReadDiary ? (
+          <Card className="xl:col-span-2">
             <CardHeader
               as="h2"
-              title="Waiting on you"
-              description="Bookings that arrived needing approval."
+              title="Today"
+              description={
+                todayAppointments.length > 0
+                  ? `${formatNumber(todayAppointments.length)} in the diary, ${formatNumber(
+                      nextUp.length,
+                    )} still to come.`
+                  : undefined
+              }
+              actions={
+                <Link
+                  to={`/app/appointments?from=${todayIso}&to=${todayIso}`}
+                  className={buttonStyles('ghost', 'sm')}
+                >
+                  Open the diary
+                </Link>
+              }
             />
             <DataState
-              isPending={pendingQuery.isPending}
-              isError={pendingQuery.isError}
-              error={pendingQuery.error}
-              onRetry={() => void pendingQuery.refetch()}
-              isEmpty={(pendingQuery.data?.items ?? []).length === 0}
-              rows={2}
-              columns={2}
+              isPending={todayQuery.isPending}
+              isError={todayQuery.isError}
+              error={todayQuery.error}
+              onRetry={() => void todayQuery.refetch()}
+              isEmpty={todayAppointments.length === 0}
+              rows={4}
+              columns={4}
               empty={
                 <EmptyState
-                  title="Nothing to approve"
-                  description="Every booking that needed a decision has had one."
+                  icon={<CalendarDays className="size-6" aria-hidden="true" />}
+                  title="Nothing booked today"
+                  description="A clear day. Share a booking link if you would rather it were not."
+                  action={
+                    <PermissionGate permission={PERMISSIONS.BOOKING_LINKS_READ}>
+                      <Link to="/app/booking-links" className={buttonStyles('secondary', 'md')}>
+                        Booking links
+                      </Link>
+                    </PermissionGate>
+                  }
                 />
               }
             >
               <ul className="divide-y divide-border">
-                {(pendingQuery.data?.items ?? []).map((appointment) => (
-                  <li key={appointment.id} className="flex flex-col gap-2 px-5 py-3">
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-medium text-fg">
+                {todayAppointments.map((appointment) => (
+                  <li key={appointment.id} className="flex flex-wrap items-center gap-3 px-5 py-3">
+                    <span className="w-16 shrink-0 text-sm font-medium tabular-nums text-fg">
+                      {formatTime(appointment.startsAt, activeTimezone)}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-medium text-fg">
                         {appointment.service?.name ?? 'Appointment'}
-                      </p>
-                      <p className="truncate text-xs text-fg-muted">
-                        {formatDate(appointment.startsAt, activeTimezone)} ·{' '}
-                        {formatTime(appointment.startsAt, activeTimezone)}
-                        {appointment.customer
-                          ? ` · ${appointment.customer.firstName} ${appointment.customer.lastName}`
+                      </span>
+                      <span className="block truncate text-xs text-fg-muted">
+                        {customerName(appointment.customer, 'No customer')}
+                        {appointment.staffProfile
+                          ? ` · ${appointment.staffProfile.displayName}`
                           : ''}
-                      </p>
-                    </div>
+                      </span>
+                    </span>
+                    <AppointmentStatusBadge status={appointment.status} />
                     <AppointmentActions
                       appointment={appointment}
-                      variant="buttons"
+                      variant="menu"
                       onCompleted={refresh}
                     />
                   </li>
                 ))}
               </ul>
             </DataState>
-            {(pendingQuery.data?.meta.totalItems ?? 0) > 5 ? (
-              <CardBody className="border-t border-border pt-3">
-                <Link
-                  to="/app/appointments?status=PENDING"
-                  className="text-sm font-medium text-brand-text underline underline-offset-4"
-                >
-                  See all {formatNumber(pendingQuery.data?.meta.totalItems ?? 0)} pending
-                </Link>
-              </CardBody>
-            ) : null}
           </Card>
+        ) : (
+          <AreaUnavailable
+            className="xl:col-span-2"
+            title="The diary is not part of your role"
+            description="Today's bookings, what is coming up and anything waiting for approval all come from the appointments endpoints, which your role in this workspace cannot read. An owner or manager can change that."
+          />
+        )}
+
+        <div className="flex flex-col gap-4">
+          {canReadDiary ? (
+            <Card>
+              <CardHeader
+                as="h2"
+                title="Waiting on you"
+                description="Bookings that arrived needing approval."
+              />
+              <DataState
+                isPending={pendingQuery.isPending}
+                isError={pendingQuery.isError}
+                error={pendingQuery.error}
+                onRetry={() => void pendingQuery.refetch()}
+                isEmpty={(pendingQuery.data?.items ?? []).length === 0}
+                rows={2}
+                columns={2}
+                empty={
+                  <EmptyState
+                    title="Nothing to approve"
+                    description="Every booking that needed a decision has had one."
+                  />
+                }
+              >
+                <ul className="divide-y divide-border">
+                  {(pendingQuery.data?.items ?? []).map((appointment) => (
+                    <li key={appointment.id} className="flex flex-col gap-2 px-5 py-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-medium text-fg">
+                          {appointment.service?.name ?? 'Appointment'}
+                        </p>
+                        <p className="truncate text-xs text-fg-muted">
+                          {formatDate(appointment.startsAt, activeTimezone)} ·{' '}
+                          {formatTime(appointment.startsAt, activeTimezone)}
+                          {appointment.customer ? ` · ${customerName(appointment.customer)}` : ''}
+                        </p>
+                      </div>
+                      <AppointmentActions
+                        appointment={appointment}
+                        variant="buttons"
+                        onCompleted={refresh}
+                      />
+                    </li>
+                  ))}
+                </ul>
+              </DataState>
+              {(pendingQuery.data?.meta.totalItems ?? 0) > 5 ? (
+                <CardBody className="border-t border-border pt-3">
+                  <Link
+                    to="/app/appointments?status=PENDING"
+                    className="text-sm font-medium text-brand-text underline underline-offset-4"
+                  >
+                    See all {formatNumber(pendingQuery.data?.meta.totalItems ?? 0)} pending
+                  </Link>
+                </CardBody>
+              ) : null}
+            </Card>
+          ) : null}
 
           <Card>
             <CardHeader as="h2" title="Quick actions" />
@@ -570,127 +678,127 @@ export default function DashboardPage(): JSX.Element {
         </div>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-2">
-        <Card>
-          <CardHeader
-            as="h2"
-            title="Staff workload"
-            description={`Booked time against rostered time, over the last ${TREND_DAYS} days.`}
-          />
-          <DataState
-            isPending={staffQuery.isPending}
-            isError={staffQuery.isError}
-            error={staffQuery.error}
-            onRetry={() => void staffQuery.refetch()}
-            isEmpty={(staffQuery.data ?? []).length === 0}
-            rows={3}
-            columns={3}
-            empty={
-              <EmptyState
-                title="No workload to show"
-                description="Nobody has taken an appointment in this window."
-              />
-            }
-          >
-            <CardBody className="flex flex-col gap-4">
-              {(staffQuery.data ?? []).map((row, index) => (
-                <div key={row.staffProfileId} className="flex flex-col gap-1.5">
-                  <div className="flex items-baseline justify-between gap-2">
-                    <span className="truncate text-sm font-medium text-fg">{row.displayName}</span>
-                    <span className="shrink-0 text-sm tabular-nums text-fg-secondary">
-                      {formatRatioAsPercent(row.utilisationRate)}
+      {canReadAnalytics ? (
+        <div className="grid gap-4 xl:grid-cols-2">
+          <Card>
+            <CardHeader
+              as="h2"
+              title="Staff workload"
+              description={`Booked time against rostered time, over the last ${TREND_DAYS} days.`}
+            />
+            <DataState
+              isPending={staffQuery.isPending}
+              isError={staffQuery.isError}
+              error={staffQuery.error}
+              onRetry={() => void staffQuery.refetch()}
+              isEmpty={(staffQuery.data ?? []).length === 0}
+              rows={3}
+              columns={3}
+              empty={
+                <EmptyState
+                  title="No workload to show"
+                  description="Nobody has taken an appointment in this window."
+                />
+              }
+            >
+              <CardBody className="flex flex-col gap-4">
+                {(staffQuery.data ?? []).map((row, index) => (
+                  <div key={row.staffProfileId} className="flex flex-col gap-1.5">
+                    <div className="flex items-baseline justify-between gap-2">
+                      <span className="truncate text-sm font-medium text-fg">
+                        {row.displayName}
+                      </span>
+                      <span className="shrink-0 text-sm tabular-nums text-fg-secondary">
+                        {formatRatioAsPercent(row.utilisationRate)}
+                      </span>
+                    </div>
+                    <span
+                      className="h-2 w-full overflow-hidden rounded-full bg-surface-sunken"
+                      aria-hidden="true"
+                    >
+                      <span
+                        className="block h-full rounded-full"
+                        style={{
+                          width: `${Math.min(100, row.utilisationRate * 100)}%`,
+                          backgroundColor: seriesColour(chart, index),
+                        }}
+                      />
+                    </span>
+                    <span className="text-xs text-fg-muted">
+                      {formatNumber(row.appointments)} appointment
+                      {row.appointments === 1 ? '' : 's'} · {formatDuration(row.bookedMinutes)} of{' '}
+                      {formatDuration(row.workingMinutes)}
+                      {row.noShows > 0 ? ` · ${formatNumber(row.noShows)} no-show` : ''}
                     </span>
                   </div>
-                  <span
-                    className="h-2 w-full overflow-hidden rounded-full bg-surface-sunken"
-                    aria-hidden="true"
-                  >
-                    <span
-                      className="block h-full rounded-full"
-                      style={{
-                        width: `${Math.min(100, row.utilisationRate * 100)}%`,
-                        backgroundColor: seriesColour(chart, index),
-                      }}
-                    />
-                  </span>
-                  <span className="text-xs text-fg-muted">
-                    {formatNumber(row.appointments)} appointment
-                    {row.appointments === 1 ? '' : 's'} · {formatDuration(row.bookedMinutes)} of{' '}
-                    {formatDuration(row.workingMinutes)}
-                    {row.noShows > 0 ? ` · ${formatNumber(row.noShows)} no-show` : ''}
-                  </span>
-                </div>
-              ))}
-            </CardBody>
-          </DataState>
-        </Card>
+                ))}
+              </CardBody>
+            </DataState>
+          </Card>
 
-        <ChartFrame
-          title="Service performance"
-          description={`Bookings per service over the last ${TREND_DAYS} days.`}
-          height={240}
-          isLoading={servicesQuery.isPending}
-          error={servicesQuery.error}
-          onRetry={() => void servicesQuery.refetch()}
-          isEmpty={topServices.length === 0}
-          emptyMessage="No service was booked in this window."
-          summary="Bookings per service, most booked first."
-          actions={
-            <PermissionGate permission={PERMISSIONS.SERVICES_READ}>
-              <Link to="/app/services" className={buttonStyles('ghost', 'sm')}>
-                Catalogue
-              </Link>
-            </PermissionGate>
-          }
-        >
-          <ResponsiveContainer width="100%" height="100%">
-            <BarChart
-              layout="vertical"
-              data={topServices}
-              margin={{ top: 4, right: 16, bottom: 4, left: 0 }}
-              barCategoryGap="30%"
-            >
-              <CartesianGrid stroke={chart.grid} strokeDasharray="3 3" horizontal={false} />
-              <XAxis
-                type="number"
-                tick={axis.tick}
-                tickLine={false}
-                axisLine={axis.line}
-                allowDecimals={false}
-              />
-              <YAxis
-                type="category"
-                dataKey="name"
-                tick={axis.tick}
-                tickLine={false}
-                axisLine={false}
-                width={124}
-              />
-              <Tooltip
-                cursor={{ fill: chart.grid, fillOpacity: 0.35 }}
-                content={<ChartTooltip formatValue={(value) => formatNumber(value)} />}
-              />
-              <Bar
-                dataKey="bookings"
-                name="Bookings"
-                fill={seriesColour(chart, 0)}
-                radius={[0, 4, 4, 0]}
-                maxBarSize={20}
-              />
-            </BarChart>
-          </ResponsiveContainer>
-        </ChartFrame>
-      </div>
-
-      {!canReadAnalytics ? (
-        <Card>
-          <EmptyState
-            icon={<Sparkles className="size-6" aria-hidden="true" />}
-            title="Analytics are not available to your role"
-            description="Utilisation, the booking trend and service performance all come from the reporting endpoints, which your role cannot read. Everything else on this page is the diary itself."
-          />
-        </Card>
-      ) : null}
+          <ChartFrame
+            title="Service performance"
+            description={`Bookings per service over the last ${TREND_DAYS} days.`}
+            height={240}
+            isLoading={servicesQuery.isPending}
+            error={servicesQuery.error}
+            onRetry={() => void servicesQuery.refetch()}
+            isEmpty={topServices.length === 0}
+            emptyMessage="No service was booked in this window."
+            summary="Bookings per service, most booked first."
+            dataTable={servicesTable}
+            actions={
+              <PermissionGate permission={PERMISSIONS.SERVICES_READ}>
+                <Link to="/app/services" className={buttonStyles('ghost', 'sm')}>
+                  Catalogue
+                </Link>
+              </PermissionGate>
+            }
+          >
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart
+                layout="vertical"
+                data={topServices}
+                margin={{ top: 4, right: 16, bottom: 4, left: 0 }}
+                barCategoryGap="30%"
+              >
+                <CartesianGrid stroke={chart.grid} strokeDasharray="3 3" horizontal={false} />
+                <XAxis
+                  type="number"
+                  tick={axis.tick}
+                  tickLine={false}
+                  axisLine={axis.line}
+                  allowDecimals={false}
+                />
+                <YAxis
+                  type="category"
+                  dataKey="name"
+                  tick={axis.tick}
+                  tickLine={false}
+                  axisLine={false}
+                  width={124}
+                />
+                <Tooltip
+                  cursor={{ fill: chart.grid, fillOpacity: 0.35 }}
+                  content={<ChartTooltip formatValue={(value) => formatNumber(value)} />}
+                />
+                <Bar
+                  dataKey="bookings"
+                  name="Bookings"
+                  fill={seriesColour(chart, 0)}
+                  radius={[0, 4, 4, 0]}
+                  maxBarSize={20}
+                />
+              </BarChart>
+            </ResponsiveContainer>
+          </ChartFrame>
+        </div>
+      ) : (
+        <AreaUnavailable
+          title="Analytics are not part of your role"
+          description="Utilisation, the booking trend, staff workload and service performance are all counted by the reporting endpoints, which your role in this workspace cannot read. An owner or manager can change that."
+        />
+      )}
     </>
   );
 }

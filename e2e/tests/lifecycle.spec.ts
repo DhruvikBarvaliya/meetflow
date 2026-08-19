@@ -20,10 +20,12 @@
 import { expect, test, type Page } from '@playwright/test';
 import {
   bookAppointment,
+  DEADLINE_COVERS_EVERYTHING,
   createBookableWorkspace,
   fetchPublicAppointment,
   fetchPublicSlots,
   type OwnerFixture,
+  setChangeDeadlines,
 } from '../fixtures/api';
 import { findInOwnerDiary, signInAsOwner, slotButtons } from '../fixtures/ui';
 
@@ -147,20 +149,47 @@ test.describe('appointment lifecycle', () => {
   });
 
   test('a booking inside the deadline explains why it cannot be changed', async ({ page }) => {
-    // Inside the 24-hour window by construction: the first opening available.
-    const { confirmation } = await bookAppointment(workspace, { firstName: 'TooLate' });
+    /*
+     * The deadline is set here rather than assumed.
+     *
+     * This test used to rely on "the first opening available" falling inside
+     * the default 24-hour window. Nothing pinned that: the slot search starts
+     * from tomorrow, so before about 09:00 local the first opening is more than
+     * 24 hours out and every assertion below inverts. It passed all evening and
+     * failed first thing the next morning, which reads exactly like a
+     * regression and is not one.
+     *
+     * Widening the deadline past any opening the search can return makes the
+     * clock irrelevant: the booking is inside the window by construction, which
+     * is what the original comment claimed and did not deliver.
+     *
+     * Restored in `finally`: this file shares one workspace across its tests,
+     * and the ones after this deliberately expect a change to be allowed.
+     */
+    await setChangeDeadlines(workspace, {
+      reschedule: DEADLINE_COVERS_EVERYTHING,
+      cancellation: DEADLINE_COVERS_EVERYTHING,
+    });
 
-    await page.goto(`/appointments/${confirmation.appointment.publicId}`);
+    try {
+      const { confirmation } = await bookAppointment(workspace, { firstName: 'TooLate' });
 
-    await expect(page.getByRole('button', { name: 'Reschedule' })).toBeDisabled();
-    await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeDisabled();
+      await page.goto(`/appointments/${confirmation.appointment.publicId}`);
 
-    // A disabled control with no explanation is a dead end, so the rule that
-    // closed it is named rather than left for the customer to infer.
-    await expect(page.getByText(/only be moved online more than 24 hr in advance/i)).toBeVisible();
-    await expect(
-      page.getByText(/only be cancelled online more than 24 hr in advance/i),
-    ).toBeVisible();
+      await expect(page.getByRole('button', { name: 'Reschedule' })).toBeDisabled();
+      await expect(page.getByRole('button', { name: 'Cancel', exact: true })).toBeDisabled();
+
+      // A disabled control with no explanation is a dead end, so the rule that
+      // closed it is named rather than left for the customer to infer. The
+      // deadline's own arithmetic is covered by the server suite; what matters
+      // here is that the page states a rule rather than simply refusing.
+      await expect(page.getByText(/only be moved online more than .+ in advance/i)).toBeVisible();
+      await expect(
+        page.getByText(/only be cancelled online more than .+ in advance/i),
+      ).toBeVisible();
+    } finally {
+      await setChangeDeadlines(workspace, { reschedule: 1440, cancellation: 1440 });
+    }
   });
 
   test('without the link, the customer names a date and time instead', async ({ page }) => {

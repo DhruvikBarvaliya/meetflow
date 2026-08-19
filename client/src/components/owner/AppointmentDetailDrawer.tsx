@@ -6,6 +6,7 @@ import { Badge, Button, Drawer, ErrorState, Field, Skeleton, Textarea } from '@/
 import { useAuth } from '@/context/AuthContext';
 import { api } from '@/lib/apiClient';
 import {
+  customerName,
   formatDateLong,
   formatDateTime,
   formatDuration,
@@ -239,10 +240,10 @@ export function AppointmentDetailDrawer({
                         to={`/app/customers?customer=${customer.id}`}
                         className="rounded-xs text-brand-text underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
                       >
-                        {customer.firstName} {customer.lastName}
+                        {customerName(customer)}
                       </Link>
                     ) : (
-                      `${customer.firstName} ${customer.lastName}`
+                      customerName(customer)
                     )}
                   </p>
                   {customer.email ? (

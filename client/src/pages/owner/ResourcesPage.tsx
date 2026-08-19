@@ -41,11 +41,9 @@ import { api, isApiError } from '@/lib/apiClient';
 import { formatNumber, humanizeEnum } from '@/lib/format';
 import { PERMISSIONS } from '@/lib/permissions';
 import { useFormApiError } from '@/pages/auth/useFormApiError';
-import type { Resource, ResourceType } from '@/types/api';
+import { RESOURCE_TYPES, type Resource } from '@/types/api';
 
 const PAGE_SIZE = 20;
-
-const RESOURCE_TYPES: ResourceType[] = ['ROOM', 'EQUIPMENT', 'DESK', 'VEHICLE', 'OTHER'];
 
 const optionalText = z
   .string()
@@ -54,7 +52,10 @@ const optionalText = z
 
 const resourceSchema = z.object({
   name: z.string().trim().min(1, 'A resource name is required.').max(160),
-  type: z.enum(['ROOM', 'EQUIPMENT', 'DESK', 'VEHICLE', 'OTHER']),
+  // Sourced from the model's own list rather than retyped: the client was
+  // missing FACILITY, which made facility resources impossible to create or
+  // filter for even though the server has always stored them.
+  type: z.enum(RESOURCE_TYPES),
   locationId: z.string().transform((value) => (value === '' ? null : value)),
   description: optionalText,
   capacity: z.coerce

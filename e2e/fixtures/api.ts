@@ -440,3 +440,35 @@ export function listAppointments(
     businessId: workspace.businessId,
   });
 }
+
+/**
+ * Rewrites the workspace's customer-change deadlines.
+ *
+ * Exists because two specs used to assert the deadline behaviour by *assuming*
+ * the first available opening fell inside a 24-hour window. Nothing pinned
+ * that: `fetchPublicSlots` searches from tomorrow, so before ~09:00 local the
+ * first opening is more than 24 hours out and the assertion inverts. The tests
+ * passed all evening and failed first thing in the morning, which is the worst
+ * shape a test failure can have — it looks like a regression and is not one.
+ *
+ * Setting the deadline explicitly turns the clock from an input into a
+ * constant: whatever opening the search returns, a deadline of `minutes` either
+ * definitely covers it or definitely does not.
+ */
+export async function setChangeDeadlines(
+  owner: OwnerFixture,
+  minutes: { reschedule: number; cancellation: number },
+): Promise<void> {
+  await apiCall('/api/v1/workspace/settings', {
+    method: 'PATCH',
+    token: owner.token,
+    businessId: owner.businessId,
+    body: {
+      rescheduleDeadlineMinutes: minutes.reschedule,
+      cancellationDeadlineMinutes: minutes.cancellation,
+    },
+  });
+}
+
+/** Far enough ahead that every opening the search can return sits inside it. */
+export const DEADLINE_COVERS_EVERYTHING = 60 * 24 * 60;
