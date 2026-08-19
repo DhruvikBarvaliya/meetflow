@@ -6,6 +6,7 @@ import type { PermissionKey } from '@/lib/permissions';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { buttonStyles } from '@/components/ui/Button';
+import { VerifyEmailGate } from './VerifyEmailGate';
 
 export interface ProtectedRouteProps {
   children: ReactNode;
@@ -49,7 +50,8 @@ export function ProtectedRoute({
   permission,
   mode = 'all',
 }: ProtectedRouteProps): JSX.Element {
-  const { status, memberships, customerProfiles, canAll, canAny, activeBusinessId } = useAuth();
+  const { status, user, memberships, customerProfiles, canAll, canAny, activeBusinessId } =
+    useAuth();
   const location = useLocation();
 
   if (status === 'loading') return <AuthPending />;
@@ -59,6 +61,21 @@ export function ProtectedRoute({
     // instead of dumping them on the dashboard after signing in.
     return <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />;
   }
+
+  /*
+   * Signed in, address unconfirmed.
+   *
+   * Checked before anything below it, because everything below assumes the
+   * queries on the page will answer: the server refuses every authenticated
+   * surface except `/auth` with 403 `EMAIL_NOT_VERIFIED`, so rendering onwards
+   * produces a screen of failed requests and no explanation of the one thing
+   * that would fix them.
+   *
+   * `user` is null only while the identity query is in flight, which the
+   * `loading` branch above has already handled; treating a null as verified
+   * here would flash the real page before the gate replaced it.
+   */
+  if (user !== null && !user.emailVerified) return <VerifyEmailGate />;
 
   /*
    * No membership, on a route that needs one. Where this goes depends on who

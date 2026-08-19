@@ -73,6 +73,23 @@ export async function createUser(
 }
 
 /**
+ * Marks an account's address as confirmed.
+ *
+ * Arrangement, not assertion. `requireVerifiedEmail` guards the management API,
+ * so a test that registers through `POST /auth/register` and then calls
+ * anything else has to get past it — and walking the real link every time would
+ * mean every file reproducing the outbox lookup to test something unrelated to
+ * verification.
+ *
+ * `emailVerification.test.ts` is where the real flow is exercised end to end,
+ * including the refusal this bypasses. Everywhere else, this is the equivalent
+ * of the user having clicked the link before the test began.
+ */
+export async function markEmailVerified(email: string): Promise<void> {
+  await User.update({ emailVerifiedAt: new Date() }, { where: { email } });
+}
+
+/**
  * A workspace ready to take bookings.
  *
  * Working hours are Mon–Fri 09:00–17:00 in `timezone` (created by

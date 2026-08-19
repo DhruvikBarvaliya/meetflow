@@ -82,6 +82,22 @@ authRouter.post(
   controller.verifyEmail,
 );
 
+/**
+ * A fresh verification link for the signed-in account.
+ *
+ * `authenticate` and deliberately not `requireVerifiedEmail`: this endpoint
+ * exists precisely for callers the gate has turned away, and putting it behind
+ * the gate would make the refusal permanent. The service's own cooldown is what
+ * stops it being used to mail-bomb the address on the account — which, for a
+ * mistyped registration, is a stranger's inbox.
+ */
+authRouter.post(
+  '/verification/resend',
+  authenticate,
+  credentialRateLimit,
+  controller.resendVerification,
+);
+
 authRouter.post(
   '/password-reset/request',
   credentialRateLimit,

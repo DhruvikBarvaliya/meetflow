@@ -28,7 +28,7 @@ surrounding surface are still being closed.
 
 |              |                                                                 |
 | ------------ | --------------------------------------------------------------- |
-| Server tests | **599 passing** (unit + integration, real PostgreSQL)           |
+| Server tests | **614 passing** (unit + integration, real PostgreSQL)           |
 | Client tests | **36 passing** (unit, the pure display and money helpers)       |
 | End-to-end   | **51 passing** (Playwright, real stack, no mocks)               |
 | Typecheck    | clean, strict, across server + client + e2e                     |
@@ -179,8 +179,8 @@ npm run test:e2e               # Playwright, against the real stack
 Or piece by piece:
 
 ```bash
-npm --workspace server run test:unit          # 102 — time/DST, slot engine, SSRF ranges, env guardrails
-npm --workspace server run test:integration   # 497 — schema, booking, lifecycle, tenancy, webhooks
+npm --workspace server run test:unit          # 106 — time/DST, slot engine, SSRF ranges, env guardrails
+npm --workspace server run test:integration   # 508 — schema, booking, lifecycle, tenancy, webhooks
 npm --workspace client run test               # 36 — the pure display and money helpers
 npm run typecheck                             # strict, server + client
 npm run lint
@@ -293,9 +293,10 @@ Stated plainly, so nothing here is mistaken for finished work.
   worse than an honest absence.
 - The security gaps recorded in
   [docs/SecurityThreatModel.md](docs/SecurityThreatModel.md) — no bot challenge
-  on public booking, email verification not enforced, no MFA, webhook signing
-  secrets stored in plaintext. (SSRF on webhook delivery and the absence of
-  dependency and container scanning were on this list and are now closed.)
+  on public booking, no MFA, and webhook signing secrets encrypted with an
+  environment key rather than a KMS-managed one. (SSRF on webhook delivery,
+  plaintext signing secrets, unenforced email verification and the absence of
+  dependency and container scanning were all on this list and are now closed.)
 
 None of these block the core promise: a business can register, configure itself,
 publish a link, and take bookings that cannot double-book.

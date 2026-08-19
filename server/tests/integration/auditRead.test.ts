@@ -33,6 +33,7 @@ import {
   TEST_PASSWORD,
   closeDatabaseConnection,
   createUser,
+  markEmailVerified,
   resetDatabase,
 } from '../helpers/fixtures';
 
@@ -88,6 +89,11 @@ async function registerAccount(tag: string, firstName: string): Promise<Account>
     .post('/api/v1/auth/register')
     .send({ email, password: TEST_PASSWORD, firstName, lastName: 'Owner', timezone: TIMEZONE })
     .expect(201);
+
+  // Past the verification gate. The real flow is exercised in
+  // `emailVerification.test.ts`; here it stands in for the user having clicked
+  // the link before this test began.
+  await markEmailVerified(email);
 
   return {
     userId: response.body.data.user.id as string,

@@ -152,6 +152,16 @@ const schema = z
      * integration suite, which starts a real HTTP server on 127.0.0.1 because
      * asserting delivery against a mock would assert nothing about delivery.
      */
+    /**
+     * Requires a confirmed email address before an account can use the
+     * management API or the customer portal.
+     *
+     * On by default and not disableable in production. The switch exists for a
+     * private deployment with no outbound mail — where every account is created
+     * by someone who already controls the mailbox — and for nothing else.
+     */
+    REQUIRE_EMAIL_VERIFICATION: booleanish(true),
+
     WEBHOOK_ALLOW_PRIVATE_TARGETS: booleanish(false),
 
     /**
@@ -204,6 +214,16 @@ const schema = z
           code: z.ZodIssueCode.custom,
           path: ['SEED_ENABLED'],
           message: 'SEED_ENABLED must be false in production — seeders are development-only',
+        });
+      }
+      if (!value.REQUIRE_EMAIL_VERIFICATION) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['REQUIRE_EMAIL_VERIFICATION'],
+          message:
+            'REQUIRE_EMAIL_VERIFICATION cannot be disabled in production — an unconfirmed ' +
+            'address can be a typo or somebody else’s, and either way the workspace it opens ' +
+            'sends its business correspondence to a stranger',
         });
       }
       if (!value.WEBHOOK_SECRET_ENCRYPTION_KEY) {

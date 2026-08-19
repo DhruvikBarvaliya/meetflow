@@ -241,9 +241,7 @@ Stated plainly rather than omitted:
 1. **No CAPTCHA / bot challenge** on public booking (above). Closing this needs
    an account with a challenge provider, so it is blocked on a decision rather
    than on work.
-2. **Email verification is not enforced** — an unverified account can still use
-   the API. The flow exists; the gate does not. Turning it on is a product
-   decision about existing accounts, not only a code change.
+2. ~~**Email verification is not enforced**~~ — **closed.** See below.
 3. **No 2FA / MFA.**
 4. **Signing secrets are not protected against host compromise.** They are now
    encrypted at rest (below), but with a key from the process environment, so
@@ -260,6 +258,58 @@ Stated plainly rather than omitted:
    production consumers with `npm run contracts:export` instead.
 
 Each open item is a deliberate, recorded gap, not an oversight.
+
+### Email verification — closed
+
+`requireVerifiedEmail` guards the tenant-scoped management API, the customer
+portal, workspace creation and the platform surface. An unconfirmed account
+answers **403 `EMAIL_NOT_VERIFIED`** — its own code rather than the generic
+permission one, because a client has to tell "you may not do this" from "do
+this one thing first", and conflating them renders a dead end where a link
+belongs.
+
+Three placement decisions carry the design, and each of them is the answer to a
+way this goes wrong:
+
+- **`/api/v1/auth` is deliberately not gated.** The only way past the refusal is
+  a link sent to the address in question, so somebody turned away must still be
+  able to sign in, see their state, ask for another link and use one. Blocking
+  at login instead puts the sole recovery path behind the thing being recovered.
+- **The gate runs _after_ `requireTenant` on the management surface.** Reversed,
+  an invited colleague who has signed in but not yet accepted is told to confirm
+  an address that no link was ever sent to — their actual next step is to accept
+  the invitation. Behind tenant resolution they get the 404 that has always
+  meant "no active membership here". Nothing is weakened: the surface is
+  tenant-scoped, so a caller without an ACTIVE membership could not use it
+  either way.
+- **Accepting an invitation stamps `emailVerifiedAt`.** An invited account is
+  created by the invitation, so nothing ever mails it a verification link.
+  Without this the colleague accepts, is promoted to ACTIVE, and is then refused
+  every endpoint in the workspace they just joined.
+
+`POST /auth/verification/resend` issues a fresh link, retiring the previous one
+so only ever one is live — two means whichever the user clicks second fails and
+reads as "the link is broken". It answers the same whether it sent one, declined
+inside its 60-second cooldown, or found the account already confirmed. The
+caller is authenticated so this is not an enumeration defence; it stops the
+endpoint becoming a way to poll "has this verified yet", and the cooldown stops
+a valid session being used to mail-bomb the address on the account — which, for
+a mistyped registration, is a stranger's inbox.
+
+**Existing accounts are grandfathered** by
+`20250101001000-grandfather-email-verification.cjs`, which stamps
+`email_verified_at = created_at` for every row that had none. Locking out an
+entire existing population, whose registration tokens are long gone, is a
+strictly worse failure than the one the gate prevents; the guarantee starts from
+that migration forward. The migration is deliberately irreversible — an honest
+`down` would have to clear the column for everybody, including people who
+verified properly. Rolling back the enforcement is an environment change, not a
+data one.
+
+`REQUIRE_EMAIL_VERIFICATION` is on by default and rejected in production if
+false. `emailVerification.test.ts` walks the whole journey — register, be
+refused, read the link out of the outbox, verify, get in — and covers each
+guarded surface separately rather than assuming any of them inherits the guard.
 
 ### SSRF on webhook delivery — closed
 

@@ -17,6 +17,14 @@ export const ErrorCode = {
   TOKEN_REVOKED: 'TOKEN_REVOKED',
   FORBIDDEN: 'FORBIDDEN',
   PERMISSION_DENIED: 'PERMISSION_DENIED',
+  /**
+   * The account is real and the session is valid; the address behind it has
+   * simply never been confirmed. Its own code rather than PERMISSION_DENIED
+   * because the two need opposite responses from a client: one is "you cannot
+   * do this", the other is "do this one thing first", and a client that cannot
+   * tell them apart shows a dead end where a link belongs.
+   */
+  EMAIL_NOT_VERIFIED: 'EMAIL_NOT_VERIFIED',
   TENANT_MISMATCH: 'TENANT_MISMATCH',
   NOT_FOUND: 'NOT_FOUND',
   CONFLICT: 'CONFLICT',

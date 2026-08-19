@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { defineConfig, devices } from '@playwright/test';
 
 /**
@@ -18,6 +21,42 @@ import { defineConfig, devices } from '@playwright/test';
  *    fixture pointed at `localhost` fails to connect on a machine with anything
  *    listening on IPv6 :4000.
  */
+/**
+ * The repository's own `.env`, for the one fixture that needs the database.
+ *
+ * `fixtures/verification.ts` reads the verification link out of the outbox,
+ * because there is no mail server in the stack and every account this suite
+ * registers is refused everything until its address is confirmed. It therefore
+ * needs the same connection string the server uses — and the port is genuinely
+ * machine-specific: `docker-compose.yml` publishes Postgres on
+ * `${POSTGRES_HOST_PORT:-5432}`, so a developer avoiding a clash with a local
+ * install has it somewhere else entirely.
+ *
+ * Parsed rather than pulled in through `dotenv`, which the e2e workspace does
+ * not depend on and does not otherwise need. Existing environment variables
+ * win, so `E2E_DATABASE_URL=… npx playwright test` still overrides everything.
+ */
+function loadRepoEnv(): void {
+  const path = join(dirname(fileURLToPath(import.meta.url)), '..', '.env');
+  let contents: string;
+  try {
+    contents = readFileSync(path, 'utf8');
+  } catch {
+    // No `.env` is a legitimate state — CI supplies the variables directly.
+    return;
+  }
+
+  for (const line of contents.split(/\r?\n/)) {
+    const match = /^\s*([A-Z0-9_]+)\s*=\s*(.*)$/.exec(line);
+    if (!match) continue;
+    const [, key, rawValue] = match;
+    if (process.env[key!] !== undefined) continue;
+    process.env[key!] = rawValue!.trim().replace(/^["']|["']$/g, '');
+  }
+}
+
+loadRepoEnv();
+
 const API_URL = process.env.E2E_API_URL ?? 'http://127.0.0.1:4000';
 const APP_URL = process.env.E2E_APP_URL ?? 'http://localhost:5173';
 

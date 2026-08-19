@@ -1270,9 +1270,21 @@ export async function acceptInvitation(
     // INVITED account for exactly that reason; mirroring it here stops an
     // invited colleague being left in a status they can never leave, because
     // nothing ever sent them a verification link.
+    //
+    // `emailVerifiedAt` is stamped for the same reason and it is load-bearing
+    // now that `requireVerifiedEmail` guards the management API. An invited
+    // account is created by the invitation, so no verification link is ever
+    // sent to it; without this line the colleague accepts, is promoted to
+    // ACTIVE, and is then refused every endpoint in the workspace they just
+    // joined, with the remedy being a link that does not exist. Only stamped
+    // when it is unset — somebody who verified independently keeps the moment
+    // they actually did it.
     const user = await User.findByPk(membership.userId, { transaction });
-    if (user && user.status === 'INVITED') {
-      await user.update({ status: 'ACTIVE' }, { transaction });
+    if (user) {
+      const promotion: { status?: 'ACTIVE'; emailVerifiedAt?: Date } = {};
+      if (user.status === 'INVITED') promotion.status = 'ACTIVE';
+      if (user.emailVerifiedAt === null) promotion.emailVerifiedAt = new Date();
+      if (Object.keys(promotion).length > 0) await user.update(promotion, { transaction });
     }
 
     await recordAudit(

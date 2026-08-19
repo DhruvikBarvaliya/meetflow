@@ -153,6 +153,7 @@
                   "TOKEN_REVOKED",
                   "FORBIDDEN",
                   "PERMISSION_DENIED",
+                  "EMAIL_NOT_VERIFIED",
                   "TENANT_MISMATCH",
                   "NOT_FOUND",
                   "CONFLICT",
@@ -953,12 +954,17 @@
                   "ADMIN",
                   "USER"
                 ]
+              },
+              "emailVerified": {
+                "type": "boolean",
+                "description": "False until the address is confirmed. While false, every authenticated surface except /auth answers 403 with code EMAIL_NOT_VERIFIED — so this is what a client reads to route somebody to the confirmation screen instead of to a page that will refuse them."
               }
             },
             "required": [
               "id",
               "email",
-              "platformRole"
+              "platformRole",
+              "emailVerified"
             ]
           },
           "memberships": {

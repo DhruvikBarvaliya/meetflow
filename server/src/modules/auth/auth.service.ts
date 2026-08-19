@@ -14,6 +14,7 @@ import {
   ConflictError,
   ErrorCode,
   ForbiddenError,
+  NotFoundError,
   UnauthenticatedError,
   ValidationError,
 } from '../../utils/errors';
@@ -551,6 +552,73 @@ export async function logoutAllSessions(
 // ---------------------------------------------------------------------------
 // Email verification and password management
 // ---------------------------------------------------------------------------
+
+/** How long a fresh verification link must wait behind the last one. */
+const VERIFICATION_RESEND_COOLDOWN_MS = 60_000;
+
+export interface ResendOutcome {
+  /** Present only when a new link was actually issued. */
+  token: string | null;
+  firstName: string;
+  email: string;
+  userId: string;
+}
+
+/**
+ * Issues a fresh verification link, or declines to without saying so.
+ *
+ * Enforcement makes this endpoint load-bearing rather than a convenience: the
+ * only way past the gate is a link, so an account whose link was lost has no
+ * other route back. That also makes it the obvious thing to abuse, hence the
+ * cooldown — a caller holding a valid session can otherwise mail-bomb the
+ * address on the account, which for a mistyped registration is a stranger's
+ * inbox.
+ *
+ * Returns `token: null` for an account that is already verified and for one
+ * inside the cooldown, and the controller answers the same 202 either way. The
+ * caller is authenticated, so this is not an enumeration defence; it is a
+ * refusal to confirm *timing*, and it keeps the endpoint from becoming a way to
+ * ask "has this account verified yet" repeatedly.
+ *
+ * A new token replaces the old one. Two live links for one address means the
+ * first one somebody clicks wins and the other silently fails, which reads to
+ * the user as "the link is broken".
+ */
+export async function resendEmailVerification(
+  userId: string,
+  metadata: RequestMetadata,
+): Promise<ResendOutcome> {
+  const user = await User.scope('withSecrets').findByPk(userId);
+  if (!user) throw new NotFoundError('Account');
+
+  const base = { firstName: user.firstName, email: user.email, userId: user.id };
+  if (user.emailVerifiedAt !== null) return { ...base, token: null };
+
+  const lastSent = user.emailVerificationSentAt?.getTime() ?? 0;
+  if (Date.now() - lastSent < VERIFICATION_RESEND_COOLDOWN_MS) {
+    log.info({ userId }, 'verification resend declined — inside the cooldown');
+    return { ...base, token: null };
+  }
+
+  const token = newVerificationToken();
+  await user.update({
+    emailVerificationTokenHash: sha256(token),
+    emailVerificationSentAt: new Date(),
+  });
+
+  await recordAudit({
+    actorType: 'USER',
+    actorUserId: user.id,
+    actorLabel: user.email,
+    action: AuditActions.USER_EMAIL_VERIFICATION_RESENT,
+    entityType: 'user',
+    entityId: user.id,
+    requestId: metadata.requestId,
+    ipAddress: metadata.ipAddress,
+  });
+
+  return { ...base, token };
+}
 
 export async function verifyEmail(token: string, metadata: RequestMetadata): Promise<void> {
   const user = await User.scope('withSecrets').findOne({

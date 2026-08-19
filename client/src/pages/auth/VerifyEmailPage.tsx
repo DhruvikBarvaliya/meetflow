@@ -46,7 +46,7 @@ interface VerifyEmailResult {
 
 export default function VerifyEmailPage(): JSX.Element {
   const [searchParams] = useSearchParams();
-  const { status } = useAuth();
+  const { status, memberships, refreshIdentity } = useAuth();
   const token = searchParams.get('token') ?? '';
   const hasToken = token.length > 0;
 
@@ -61,6 +61,13 @@ export default function VerifyEmailPage(): JSX.Element {
     mutationFn: (value) =>
       api.post<VerifyEmailResult>('/auth/verify-email', { token: value }, { anonymous: true }),
     retry: false,
+    // The cached identity still says unverified, and every guarded route reads
+    // it. Without this a person who has just confirmed their address is shown
+    // the "confirm your address" screen until they reload by hand — at exactly
+    // the moment they are watching.
+    onSuccess: () => {
+      if (status === 'authenticated') void refreshIdentity();
+    },
   });
 
   const { mutate } = verify;
@@ -128,9 +135,19 @@ export default function VerifyEmailPage(): JSX.Element {
             account. Anywhere you have booked with it, past and future, now shows up in one place.
           </p>
           {status === 'authenticated' ? (
-            <Link to="/portal" className={buttonStyles('primary', 'lg')}>
-              See your bookings
-            </Link>
+            // Where "ready" actually is depends on who they are. Somebody who
+            // holds a membership came here to run a workspace; somebody who
+            // does not came for their own bookings, and the sentence above is
+            // about those.
+            memberships.length > 0 ? (
+              <Link to="/app" className={buttonStyles('primary', 'lg')}>
+                Go to your workspace
+              </Link>
+            ) : (
+              <Link to="/portal" className={buttonStyles('primary', 'lg')}>
+                See your bookings
+              </Link>
+            )
           ) : (
             <Link to="/login" className={buttonStyles('primary', 'lg')}>
               Sign in

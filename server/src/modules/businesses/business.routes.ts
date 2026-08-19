@@ -11,7 +11,7 @@
  *   other module.
  */
 import { Router } from 'express';
-import { authenticate } from '../../middleware/authenticate';
+import { authenticate, requireVerifiedEmail } from '../../middleware/authenticate';
 import { apiRateLimit } from '../../middleware/rateLimit';
 import { requirePermission } from '../../middleware/tenant';
 import { validate } from '../../middleware/validate';
@@ -27,10 +27,17 @@ import {
 /** Mounted directly on /api/v1 — authenticated, no workspace required. */
 export const workspaceCreationRouter = Router();
 
+// `requireVerifiedEmail` on creation but not on the slug check below. Claiming
+// a workspace is the act this gate exists for: an unconfirmed address is a typo
+// or somebody else's, and either way the business correspondence a workspace
+// generates would go to a stranger. Checking whether a slug is free reveals
+// nothing and changes nothing, so gating it would only make the form fail
+// halfway through for no benefit.
 workspaceCreationRouter.post(
   '/workspaces',
   authenticate,
   apiRateLimit,
+  requireVerifiedEmail,
   validate({ body: createBusinessSchema }),
   controller.create,
 );

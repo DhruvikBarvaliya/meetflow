@@ -16,6 +16,20 @@ export interface AuthContext {
   sessionId: string;
   /** Convenience flag. Platform admins still never bypass tenant scoping. */
   isPlatformAdmin: boolean;
+  /**
+   * Whether the address behind this account has been confirmed.
+   *
+   * Carried on the context rather than re-read per request because
+   * `authenticate` already loads the row — it has to, to honour a suspension
+   * that happened after the token was signed — so this costs nothing and
+   * `requireVerifiedEmail` stays a pure function of what is already known.
+   *
+   * Deliberately not a JWT claim. A claim would be stale for the lifetime of
+   * the token, so somebody who verified thirty seconds ago would keep being
+   * refused until their access token expired, which is precisely the moment
+   * they are most likely to be watching.
+   */
+  emailVerified: boolean;
 }
 
 /**

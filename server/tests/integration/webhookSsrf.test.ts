@@ -23,7 +23,7 @@ vi.mock('../../src/config/env', async (importOriginal) => {
 
 import { createApp } from '../../src/app';
 import { WebhookEndpoint } from '../../src/database/models';
-import { closeDatabaseConnection, resetDatabase } from '../helpers/fixtures';
+import { closeDatabaseConnection, markEmailVerified, resetDatabase } from '../helpers/fixtures';
 
 const app = createApp();
 const password = 'Str0ngPass!2026';
@@ -40,6 +40,10 @@ beforeAll(async () => {
     .send({ email, password, firstName: 'Test', lastName: 'Owner', timezone: 'Asia/Kolkata' })
     .expect(201);
   token = registration.body.data.accessToken as string;
+  // Past the verification gate. The real flow is exercised in
+  // `emailVerification.test.ts`; here it is arrangement, standing in for the
+  // user having clicked the link before this test began.
+  await markEmailVerified(email);
 
   const workspace = await request(app)
     .post('/api/v1/workspaces')

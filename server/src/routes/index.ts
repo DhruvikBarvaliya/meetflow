@@ -43,7 +43,11 @@
  * it belongs above that line.
  */
 import { Router } from 'express';
-import { authenticate, requirePlatformAdmin } from '../middleware/authenticate';
+import {
+  authenticate,
+  requirePlatformAdmin,
+  requireVerifiedEmail,
+} from '../middleware/authenticate';
 import { notFoundHandler } from '../middleware/errorHandler';
 import { apiRateLimit, publicRateLimit } from '../middleware/rateLimit';
 import { requireTenant } from '../middleware/tenant';
@@ -93,7 +97,10 @@ publicRouter.use(publicRateLimit);
  * standing between a cross-tenant read and every signed-in user.
  */
 export const platformRouter = Router();
-platformRouter.use(authenticate, apiRateLimit, requirePlatformAdmin);
+// The admin check first, for the same reason: a caller who is not an operator
+// should be told that and nothing about the state of their own account on a URL
+// they have no business on.
+platformRouter.use(authenticate, apiRateLimit, requirePlatformAdmin, requireVerifiedEmail);
 
 /**
  * Customer surface.
@@ -120,7 +127,7 @@ platformRouter.use(authenticate, apiRateLimit, requirePlatformAdmin);
  * resolution.
  */
 export const customerRouter = Router();
-customerRouter.use(authenticate, apiRateLimit);
+customerRouter.use(authenticate, apiRateLimit, requireVerifiedEmail);
 
 /**
  * Authenticated management surface.
@@ -133,7 +140,20 @@ customerRouter.use(authenticate, apiRateLimit);
  * cannot be probed to discover which endpoints exist.
  */
 export const managementRouter = Router();
-managementRouter.use(authenticate, apiRateLimit, requireTenant);
+// `requireVerifiedEmail` *after* `requireTenant`, and the order is load-bearing.
+//
+// Reversed, an invited colleague who has signed in but not yet accepted gets
+// "confirm your email address" — which is a dead end twice over: their next
+// step is to accept the invitation, and no verification link was ever sent to
+// an account the invitation itself created. Behind tenant resolution they get
+// the 404 that has always meant "you have no active membership here", and the
+// gate is met only by somebody who genuinely belongs to the workspace.
+//
+// Nothing is weakened by the swap. The surface is tenant-scoped, so a caller
+// without an ACTIVE membership could not use it either way, and acceptance now
+// stamps `emailVerifiedAt` — so a member who has legitimately joined is past
+// the gate before they ever reach it.
+managementRouter.use(authenticate, apiRateLimit, requireTenant, requireVerifiedEmail);
 
 // --- 1. Unauthenticated auth endpoints ------------------------------------
 apiRouter.use('/auth', authRouter);
@@ -153,6 +173,14 @@ apiRouter.use(workspaceCreationRouter);
 // ACTIVE ones. Mounted after the management router these two paths would 404
 // for every invitee, leaving them permanently unable to join the workspace that
 // invited them. The rest of `/members` is tenant-scoped and mounts below.
+//
+// These two are also the one authenticated surface with **no**
+// `requireVerifiedEmail`, and that is not an oversight. An invited account is
+// created by the invitation itself and no verification link is ever sent to it,
+// so gating acceptance would deadlock: nothing to verify with, and nothing
+// reachable until verified. Acceptance is itself proof of mailbox control — the
+// invitation went to that address and nowhere else — so `acceptInvitation`
+// stamps `emailVerifiedAt` rather than being blocked by it.
 apiRouter.use(memberInvitesRouter);
 
 // --- 3. Public booking surface --------------------------------------------

@@ -279,7 +279,13 @@ export interface Membership {
  * in that window.
  */
 export interface MeResponse {
-  user: Pick<AuthUser, 'id' | 'email' | 'platformRole'>;
+  /**
+   * `emailVerified` is here rather than only on `AuthUser` because it is what
+   * the shell reads on every load: while it is false, every authenticated
+   * surface except `/auth` answers 403 `EMAIL_NOT_VERIFIED`, so the client has
+   * to route to the confirmation screen instead of to a page that will refuse.
+   */
+  user: Pick<AuthUser, 'id' | 'email' | 'platformRole' | 'emailVerified'>;
   memberships: Membership[];
   /**
    * How many workspaces hold a customer record for this person.

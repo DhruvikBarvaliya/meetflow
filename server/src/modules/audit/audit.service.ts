@@ -30,6 +30,7 @@ export const AuditActions = {
   USER_PASSWORD_RESET_REQUESTED: 'user.password_reset_requested',
   USER_PASSWORD_RESET_COMPLETED: 'user.password_reset_completed',
   USER_EMAIL_VERIFIED: 'user.email_verified',
+  USER_EMAIL_VERIFICATION_RESENT: 'user.email_verification_resent',
 
   // Workspace
   BUSINESS_CREATED: 'business.created',

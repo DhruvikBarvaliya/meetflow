@@ -13,6 +13,7 @@
  */
 import { expect, type Locator, type Page } from '@playwright/test';
 import { TEST_PASSWORD, TEST_TIMEZONE, uniqueEmail, uniqueName, uniqueSlug } from './api';
+import { verifyEmailFor } from './verification';
 
 /**
  * Slot buttons carry the opening time as their accessible name, formatted
@@ -64,6 +65,19 @@ export async function registerThroughUi(
   await page.getByLabel(/^Password/).fill(user.password);
   await page.getByLabel('Confirm password').fill(user.password);
   await page.getByRole('button', { name: /create account/i }).click();
+
+  // The product's first stop for a brand-new account is the confirmation
+  // screen, not onboarding: `requireVerifiedEmail` guards every authenticated
+  // surface, so there is nothing for them to do until the address is confirmed.
+  // Asserted rather than skipped past, because a registration that silently
+  // dropped somebody straight into onboarding would mean the gate had stopped
+  // working and no other spec would notice.
+  await expect(page.getByRole('heading', { name: 'Confirm your email address' })).toBeVisible();
+  await expect(page.getByText(user.email)).toBeVisible();
+
+  // Then the link, taken out of the outbox — see `fixtures/verification.ts`.
+  await verifyEmailFor(user.email);
+  await page.reload();
 
   await expect(page).toHaveURL(/\/create-workspace$/);
   return user;

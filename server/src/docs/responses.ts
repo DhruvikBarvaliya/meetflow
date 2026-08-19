@@ -420,6 +420,13 @@ export const authContextSchema = named(
         id: uuid,
         email: z.string(),
         platformRole: z.enum(PLATFORM_ROLES),
+        emailVerified: z.boolean().openapi({
+          description:
+            'False until the address is confirmed. While false, every authenticated surface ' +
+            'except /auth answers 403 with code EMAIL_NOT_VERIFIED — so this is what a client ' +
+            'reads to route somebody to the confirmation screen instead of to a page that ' +
+            'will refuse them.',
+        }),
       }),
       memberships: z.array(
         z.object({

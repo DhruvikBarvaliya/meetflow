@@ -56,7 +56,7 @@ import { AuditActions } from '../../src/modules/audit/audit.service';
 import { PERMISSIONS } from '../../src/modules/auth/permissions';
 import { memberInvitesRouter, membersRouter } from '../../src/modules/members/members.routes';
 import { apiRouter, managementRouter } from '../../src/routes';
-import { closeDatabaseConnection, resetDatabase } from '../helpers/fixtures';
+import { closeDatabaseConnection, markEmailVerified, resetDatabase } from '../helpers/fixtures';
 
 managementRouter.use('/members', membersRouter);
 
@@ -103,6 +103,12 @@ async function registerAccount(tag: string): Promise<Account> {
       timezone: 'Asia/Kolkata',
     })
     .expect(201);
+
+  // Past the verification gate. The real flow is exercised in
+  // `emailVerification.test.ts`; here it stands in for the user having clicked
+  // the link before this test began.
+  await markEmailVerified(email);
+
   return {
     userId: response.body.data.user.id as string,
     email,

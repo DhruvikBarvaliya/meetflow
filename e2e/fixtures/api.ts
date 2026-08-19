@@ -15,6 +15,8 @@
  *    created the record; a spec that asserted on a literal uuid would be
  *    asserting on the seed data rather than on the product.
  */
+import { verifyEmailFor } from './verification';
+
 const API_URL = process.env.E2E_API_URL ?? 'http://127.0.0.1:4000';
 
 /** Satisfies the server policy: 10+ chars, upper, lower, digit, not breached. */
@@ -139,6 +141,12 @@ export async function registerAccount(prefix = 'owner'): Promise<AccountFixture>
       },
     },
   );
+  // Confirmed before the fixture returns, because `requireVerifiedEmail` guards
+  // every authenticated surface and an unverified account can do nothing at all.
+  // This walks the real link out of the outbox rather than stamping the column —
+  // see `verification.ts`.
+  await verifyEmailFor(email);
+
   return { email, password: TEST_PASSWORD, token: result.accessToken, userId: result.user.id };
 }
 

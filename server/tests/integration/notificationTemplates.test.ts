@@ -32,7 +32,7 @@ import {
   enqueueNotification,
 } from '../../src/modules/notifications/notification.service';
 import { DEFAULT_TEMPLATES } from '../../src/modules/notifications/templates';
-import { closeDatabaseConnection, resetDatabase } from '../helpers/fixtures';
+import { closeDatabaseConnection, markEmailVerified, resetDatabase } from '../helpers/fixtures';
 
 const app = createApp();
 const password = 'Str0ngPass!2026';
@@ -51,6 +51,10 @@ async function registerWorkspace(tag: string, name: string): Promise<Session> {
     .send({ email, password, firstName: 'Test', lastName: 'Owner', timezone: 'Asia/Kolkata' })
     .expect(201);
   const token = registration.body.data.accessToken as string;
+  // Past the verification gate. The real flow is exercised in
+  // `emailVerification.test.ts`; here it is arrangement, standing in for the
+  // user having clicked the link before this test began.
+  await markEmailVerified(email);
 
   const workspace = await request(app)
     .post('/api/v1/workspaces')

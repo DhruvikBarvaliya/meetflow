@@ -29,11 +29,12 @@ import { login } from '../../src/modules/auth/auth.service';
 import { PERMISSIONS } from '../../src/modules/auth/permissions';
 import {
   TEST_PASSWORD,
+  type WorkspaceFixture,
   closeDatabaseConnection,
   createWorkspace,
+  markEmailVerified,
   nextWeekdayAt,
   resetDatabase,
-  type WorkspaceFixture,
 } from '../helpers/fixtures';
 
 const app = createApp();
@@ -55,6 +56,10 @@ async function registerAndCreateWorkspace(tag: string, name: string): Promise<Se
     .expect(201);
 
   const token = registration.body.data.accessToken as string;
+  // Past the verification gate. The real flow is exercised in
+  // `emailVerification.test.ts`; here it is arrangement, standing in for the
+  // user having clicked the link before this test began.
+  await markEmailVerified(email);
 
   const workspace = await request(app)
     .post('/api/v1/workspaces')

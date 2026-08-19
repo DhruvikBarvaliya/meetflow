@@ -7,6 +7,7 @@
  */
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import { Op } from 'sequelize';
+import { env } from '../config/env';
 import { User } from '../database/models';
 import { ErrorCode, ForbiddenError, UnauthenticatedError } from '../utils/errors';
 import { RefreshToken } from '../database/models';
@@ -45,6 +46,7 @@ async function resolveAuth(token: string): Promise<Request['auth']> {
     platformRole: user.platformRole,
     sessionId: claims.sid,
     isPlatformAdmin: user.platformRole === 'ADMIN',
+    emailVerified: user.emailVerifiedAt !== null,
   };
 }
 
@@ -105,4 +107,44 @@ export const requirePlatformAdmin: RequestHandler = (
     return;
   }
   next();
+};
+
+/**
+ * Refuses a caller whose email address has never been confirmed.
+ *
+ * Applied to the tenant-scoped management API and the customer portal, and
+ * deliberately **not** to `/api/v1/auth`. That asymmetry is the whole design:
+ * the way out of this refusal is a link sent to the address in question, so a
+ * caller who is turned away must still be able to sign in, see what state they
+ * are in, ask for a new link, and use one. Blocking at login instead would put
+ * the only recovery path behind the thing being recovered.
+ *
+ * Public booking is unaffected — it is unauthenticated, and a customer booking
+ * an appointment has no MeetFlow account to verify.
+ *
+ * `ErrorCode.EMAIL_NOT_VERIFIED` rather than the generic permission code
+ * because a client has to tell "you may not do this" from "do this one thing
+ * first"; conflating them renders a dead end where a link belongs.
+ */
+export const requireVerifiedEmail: RequestHandler = (
+  req: Request,
+  _res: Response,
+  next: NextFunction,
+): void => {
+  if (!req.auth) {
+    next(new UnauthenticatedError());
+    return;
+  }
+  // The switch exists so a private deployment can run without outbound mail.
+  // `env.ts` refuses to start with it off in production.
+  if (!env.REQUIRE_EMAIL_VERIFICATION || req.auth.emailVerified) {
+    next();
+    return;
+  }
+  next(
+    new ForbiddenError(
+      'Confirm your email address to finish setting up your account. We sent a link when you registered — ask for another if you no longer have it.',
+      ErrorCode.EMAIL_NOT_VERIFIED,
+    ),
+  );
 };

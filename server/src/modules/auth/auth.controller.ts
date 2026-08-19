@@ -135,6 +135,10 @@ export const me = asyncHandler(async (req: Request, res: Response) => {
       id: req.auth.userId,
       email: req.auth.email,
       platformRole: req.auth.platformRole,
+      // What the client needs to tell "you may not do this" from "confirm your
+      // address first". Without it the only signal is a 403 on whatever page
+      // the user happened to open, which is a poor place to learn it.
+      emailVerified: req.auth.emailVerified,
     },
     memberships,
     // Lets the client tell a new owner apart from a customer when neither
@@ -151,6 +155,37 @@ export const me = asyncHandler(async (req: Request, res: Response) => {
           permissions: [...req.tenant.permissions].sort(),
         }
       : null,
+  });
+});
+
+/**
+ * Sends a fresh verification link.
+ *
+ * Always 202, whether a link was issued, the account is already verified, or
+ * the last one went out thirty seconds ago. The caller is authenticated so this
+ * is not an enumeration defence — it stops the endpoint becoming a way to poll
+ * "has this account verified yet", and it means a client can call it without
+ * branching on three outcomes that all lead to the same screen: "check your
+ * email".
+ */
+export const resendVerification = asyncHandler(async (req: Request, res: Response) => {
+  if (!req.auth) throw new UnauthenticatedError();
+
+  const outcome = await authService.resendEmailVerification(req.auth.userId, metadataOf(req));
+  if (outcome.token) {
+    await enqueueEmailVerification({
+      userId: outcome.userId,
+      email: outcome.email,
+      firstName: outcome.firstName,
+      token: outcome.token,
+    });
+  }
+
+  // 200 with the same body in all three cases, matching the password-reset
+  // endpoint above rather than inventing a second convention for "we may or may
+  // not have sent you something".
+  sendSuccess(res, {
+    message: 'If that account still needs confirming, a new link is on its way.',
   });
 });
 
