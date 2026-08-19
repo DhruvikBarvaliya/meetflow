@@ -39,6 +39,8 @@ const PRODUCTION_BASE: Record<string, string | undefined> = {
   LOG_PRETTY: 'false',
   EMAIL_PROVIDER: 'smtp',
   SMTP_HOST: 'smtp.meetflow.test',
+  WEBHOOK_SECRET_ENCRYPTION_KEY: 'production-webhook-key-long-enough',
+  WEBHOOK_ALLOW_PRIVATE_TARGETS: 'false',
 };
 
 interface BootOutcome {
@@ -152,5 +154,50 @@ describe('production guardrail: EMAIL_PROVIDER', () => {
     expect(outcome.report).toContain('EMAIL_PROVIDER');
     expect(outcome.report).toContain('SEED_ENABLED');
     expect(outcome.report).toContain('CORS_ORIGINS');
+  });
+});
+
+describe('production guardrail: webhook secrets at rest', () => {
+  it('refuses to start without an encryption key', async () => {
+    // Without it the signing secrets sit in the table in plaintext, and a
+    // leaked backup is enough to forge deliveries a tenant's server accepts as
+    // genuine — which is the entire purpose of signing them.
+    const outcome = await boot({ WEBHOOK_SECRET_ENCRYPTION_KEY: undefined });
+
+    expect(outcome.started).toBe(false);
+    expect(outcome.report).toContain('WEBHOOK_SECRET_ENCRYPTION_KEY');
+  });
+
+  it('does not require one outside production', async () => {
+    // A local checkout needs no configuration to run the suite; the warning in
+    // `secretBox.ts` is what says so at runtime.
+    const outcome = await boot({
+      APP_ENV: 'development',
+      WEBHOOK_SECRET_ENCRYPTION_KEY: undefined,
+    });
+
+    expect(outcome.started).toBe(true);
+  });
+});
+
+describe('production guardrail: WEBHOOK_ALLOW_PRIVATE_TARGETS', () => {
+  it('refuses to start when the SSRF guard is switched off', async () => {
+    // The flag exists so the integration suite can deliver to a real receiver
+    // on 127.0.0.1. A deployment that sets it has turned off the only thing
+    // stopping a tenant pointing MeetFlow at its own metadata service, so the
+    // process refuses to start rather than running unguarded.
+    const outcome = await boot({ WEBHOOK_ALLOW_PRIVATE_TARGETS: 'true' });
+
+    expect(outcome.started).toBe(false);
+    expect(outcome.report).toContain('WEBHOOK_ALLOW_PRIVATE_TARGETS');
+  });
+
+  it('allows it outside production', async () => {
+    const outcome = await boot({
+      APP_ENV: 'development',
+      WEBHOOK_ALLOW_PRIVATE_TARGETS: 'true',
+    });
+
+    expect(outcome.started).toBe(true);
   });
 });

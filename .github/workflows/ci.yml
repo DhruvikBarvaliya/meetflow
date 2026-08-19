@@ -6,13 +6,14 @@
 # contracts drifted from the routes they describe. A gate nobody executes is a
 # gate that is already open.
 #
-# Five jobs, deliberately separate so a failure names its own cause rather than
+# Six jobs, deliberately separate so a failure names its own cause rather than
 # being buried in one long log:
 #
 #   verify     the repo's own gate: format, lint, typecheck, tests, build
 #   contracts  regenerate OpenAPI + Postman and fail on any diff
 #   e2e        Playwright against a real stack booted from scratch
-#   docker     the production images actually build
+#   docker     the production images build, and Trivy scans the result
+#   deps       new dependency advisories, against a reviewed allowlist
 #   secrets    the secret scanner that documents itself as a hook nothing invoked
 #
 # `verify`, `contracts` and `e2e` all need real PostgreSQL and Redis. Nothing
@@ -230,6 +231,8 @@ jobs:
           context: .
           file: docker/server.Dockerfile
           push: false
+          load: true
+          tags: meetflow-server:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -239,8 +242,64 @@ jobs:
           context: .
           file: docker/client.Dockerfile
           push: false
+          load: true
+          tags: meetflow-client:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Scanned rather than only built. An image that assembles is not the same
+      # claim as an image without a known-vulnerable base layer, and the base is
+      # the half nobody edits and therefore nobody re-examines.
+      #
+      # HIGH and CRITICAL only, and `ignore-unfixed`: an advisory with no fixed
+      # version available is not something this build can act on, and failing on
+      # it produces a red build that stays red — which is exactly the failure
+      # mode `scripts/audit-gate.mjs` exists to avoid on the npm side.
+      - name: Scan the API image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: meetflow-server:ci
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+
+      - name: Scan the client image
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: meetflow-client:ci
+          format: table
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: '1'
+
+  # ---------------------------------------------------------------------------
+  dependencies:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      # Not `npm audit --audit-level=high`. That goes red on day one for
+      # advisories somebody has already reviewed and accepted, stays red, and
+      # within a week a red build is the normal state of the world — at which
+      # point a genuinely new advisory lands in a build nobody looks at twice.
+      #
+      # The gate fails on advisories that are *new*: everything currently
+      # accepted is recorded in `.audit-allowlist.json` with its reason, and an
+      # entry for an advisory that has since disappeared fails too, because a
+      # stale exemption pre-approves a finding nobody has read.
+      - name: Advisory gate
+        run: node scripts/audit-gate.mjs
 
   # ---------------------------------------------------------------------------
   secrets:

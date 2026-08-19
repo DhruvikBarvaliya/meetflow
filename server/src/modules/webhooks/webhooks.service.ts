@@ -37,6 +37,7 @@ import { fanOutEvent, scheduleDeliveries } from '../../jobs/processors/webhook.p
 import { ConflictError, ErrorCode, NotFoundError } from '../../utils/errors';
 import { newUuid, newWebhookSecret } from '../../utils/ids';
 import { AuditActions, recordAudit } from '../audit/audit.service';
+import { assertDeliverableUrl } from '../../utils/ssrf';
 import type { RequestMetadata } from '../auth/auth.service';
 import { WebhookEvents, type WebhookEvent } from './webhooks.validation';
 
@@ -264,6 +265,13 @@ export async function createEndpoint(
   actor: WebhookActor,
   metadata: RequestMetadata,
 ): Promise<CreatedWebhookEndpoint> {
+  // Refused before anything is created, so an operator learns from the form
+  // rather than from a delivery log. This is the friendly half of the SSRF
+  // guard; the half that actually protects anything runs at connect time in
+  // `utils/ssrf.ts`, because a name registered today can point at 127.0.0.1
+  // tomorrow.
+  assertDeliverableUrl(input.url);
+
   // Generated here rather than read back from the row: the plaintext exists in
   // exactly one variable, in one function, and the response is built from that
   // variable. Nothing downstream has to remember to fetch it, and nothing
@@ -335,6 +343,11 @@ export async function updateEndpoint(
   actor: WebhookActor,
   metadata: RequestMetadata,
 ): Promise<SerialisedWebhookEndpoint> {
+  // Re-checked on update, not only on create: an endpoint registered at a
+  // public address and then edited to a private one would otherwise walk
+  // straight past the create-time check.
+  if (input.url !== undefined) assertDeliverableUrl(input.url);
+
   const endpoint = await sequelize.transaction(async (transaction) => {
     const target = await findEndpointOrFail(businessId, endpointId, transaction);
 

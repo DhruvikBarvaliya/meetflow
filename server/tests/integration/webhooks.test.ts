@@ -30,6 +30,7 @@ import crypto from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { Job } from 'bullmq';
+import { QueryTypes } from 'sequelize';
 import request from 'supertest';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../../src/app';
@@ -188,6 +189,17 @@ describe('registering an endpoint', () => {
     // it — but it is not readable through any API the tenant can reach.
     const stored = await WebhookEndpoint.scope('withSecret').findByPk(created.id);
     expect(stored?.signingSecret).toBe(created.signingSecret);
+
+    // And the column holds ciphertext, not that string. The model's getter
+    // decrypts on the way out, so the assertion above passes either way — which
+    // is exactly why the raw column is read here as well. Without this, turning
+    // encryption off would break nothing and nobody would find out.
+    const [raw] = await sequelize.query<{ signing_secret: string }>(
+      'SELECT signing_secret FROM webhook_endpoints WHERE id = :id',
+      { replacements: { id: created.id }, type: QueryTypes.SELECT },
+    );
+    expect(raw!.signing_secret).not.toContain(created.signingSecret);
+    expect(raw!.signing_secret.startsWith('v1.')).toBe(true);
 
     const detail = await api(owner, `/api/v1/webhooks/${created.id}`).expect(200);
     const list = await api(owner, '/api/v1/webhooks').expect(200);

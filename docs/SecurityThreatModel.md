@@ -238,19 +238,127 @@ range, or at the Sequelize 7 upgrade.
 
 Stated plainly rather than omitted:
 
-1. **No CAPTCHA / bot challenge** on public booking (above).
-2. **No SSRF protection** on webhook target URLs (above).
-3. **Email verification is not enforced** — an unverified account can still use
-   the API. The flow exists; the gate does not.
-4. **No 2FA / MFA.**
-5. **Signing secrets are stored in plaintext** in `webhook_endpoints`. They
-   should be encrypted at rest with a KMS-managed key.
-6. **No automated dependency or container scanning** in the repository yet
-   (`npm audit`, Trivy or equivalent should run in CI). The advisories currently
-   outstanding are accepted deliberately and recorded above under
-   [Dependency advisories](#dependency-advisories).
-7. ~~**`/api/docs` is unauthenticated**~~ — **closed.** The docs router is no
+1. **No CAPTCHA / bot challenge** on public booking (above). Closing this needs
+   an account with a challenge provider, so it is blocked on a decision rather
+   than on work.
+2. **Email verification is not enforced** — an unverified account can still use
+   the API. The flow exists; the gate does not. Turning it on is a product
+   decision about existing accounts, not only a code change.
+3. **No 2FA / MFA.**
+4. **Signing secrets are not protected against host compromise.** They are now
+   encrypted at rest (below), but with a key from the process environment, so
+   anything that can read that environment can decrypt. A KMS-managed key with
+   per-request unwrapping is the next step.
+5. ~~**No SSRF protection** on webhook target URLs~~ — **closed.** See below.
+6. ~~**Signing secrets are stored in plaintext**~~ — **closed**, with the
+   caveat in 4. See below.
+7. ~~**No automated dependency or container scanning**~~ — **closed.** The
+   `dependencies` job runs `scripts/audit-gate.mjs`, and the `docker` job scans
+   both built images with Trivy at HIGH and CRITICAL. See below.
+8. ~~**`/api/docs` is unauthenticated**~~ — **closed.** The docs router is no
    longer mounted when `APP_ENV=production`; the contract is generated for
    production consumers with `npm run contracts:export` instead.
 
-Each is a deliberate, recorded gap, not an oversight.
+Each open item is a deliberate, recorded gap, not an oversight.
+
+### SSRF on webhook delivery — closed
+
+A webhook URL is a string a tenant types and MeetFlow's own server then
+connects to, from inside whatever network it is deployed in.
+`http://169.254.169.254/latest/meta-data/iam/security-credentials/` is the
+canonical target: on a cloud instance it answers with credentials, and the
+delivery record captures the first 2 KB of the response where whoever
+registered the endpoint can read it back.
+
+`utils/ssrf.ts` refuses it in two places, and only the second one is a security
+control:
+
+| Where                                        | What it is for                                                                                           |
+| -------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `assertDeliverableUrl`, on create and update | Usability. The operator is told at the form rather than from a delivery log. Names are **not** resolved. |
+| `guardedLookup`, passed to `http.request`    | The control. Runs on the resolution the socket is actually opened with, on every attempt.                |
+
+The split matters because a check at registration and a socket opened minutes
+later are two different questions, and DNS rebinding is the technique for making
+the answers differ. `node:http`/`node:https` are used rather than `fetch`
+precisely because they accept a `lookup`; `fetch` offers no equivalent hook
+without an undici `Agent`, and validating the URL beforehand would leave exactly
+that window open. Redirects are not followed, so there is no second hop to
+guard.
+
+Blocked: loopback, `0.0.0.0/8`, all three RFC 1918 ranges, carrier-grade NAT,
+link-local (which is where the metadata service lives), the documentation and
+benchmarking ranges, multicast and reserved space; and on the IPv6 side the
+unspecified and loopback addresses, unique-local, link-local, multicast and
+documentation prefixes. IPv4-mapped (`::ffff:127.0.0.1`) and NAT64 addresses are
+unwrapped and checked as IPv4, which is the case a prefix-matching guard
+usually misses. `localhost`, `*.local`, `*.internal`, `*.home.arpa` and
+`metadata.google.internal` are refused without resolving at all.
+
+`WEBHOOK_ALLOW_PRIVATE_TARGETS` turns the guard off for local development and
+for the integration suite, which starts a real HTTP receiver on 127.0.0.1
+because asserting delivery against a mock asserts nothing about delivery.
+`env.ts` **rejects the flag when `APP_ENV=production`** — the process refuses to
+start rather than running unguarded — so it cannot be enabled by
+misconfiguration. `ssrf.test.ts` and `webhookSsrf.test.ts` both force it back
+off, so neither can pass for the wrong reason.
+
+### Webhook signing secrets at rest — closed
+
+Every other secret MeetFlow stores is a digest: passwords are hashed, refresh
+tokens are stored as SHA-256, and nothing needs the original back. A webhook
+signing secret is the exception — every delivery computes an HMAC with it — so
+it has to be recoverable, and hashing is not available.
+
+It is therefore encrypted with **AES-256-GCM** by a getter/setter pair on the
+model attribute, so `endpoint.signingSecret` is plaintext everywhere in the
+application and only the column holds ciphertext. Putting it in the service
+instead would mean the one call site that forgets is the one that leaks, with
+nothing in a read to reveal it.
+
+Three details are the substance rather than the decoration:
+
+- **GCM, not CBC.** The tag authenticates the ciphertext, so a row somebody
+  edited fails to open rather than decrypting to something else and signing
+  deliveries the recipient rejects for reasons nobody can trace.
+- **The endpoint id is bound in as additional authenticated data.** Without it,
+  write access to the table is enough to paste a neighbour's ciphertext onto
+  your own endpoint and read the secret back through your own create response.
+- **A value with no `v1.` prefix is returned unchanged.** Rows written before
+  this existed keep working, so enabling the key is a deployment step rather
+  than a migration with every endpoint broken until it finishes.
+
+`WEBHOOK_SECRET_ENCRYPTION_KEY` is **required in production** — `env.ts` refuses
+to start without it — and optional elsewhere, so a local checkout needs no
+configuration. The test suite sets it, which means `webhooks.test.ts` signs with
+a secret that has genuinely been through the round trip and asserts the raw
+column is ciphertext; without that the suite would exercise only the plaintext
+path and prove nothing about the encrypted one.
+
+**What this buys, precisely.** It defends against the database alone being lost
+— a stolen dump, a snapshot on the wrong bucket, a read-only SQL injection, a
+support engineer with a psql prompt. It does **not** defend against the host
+being compromised, because the key is in the process environment. That is gap 4
+above, and it is stated rather than glossed.
+
+### Dependency and container scanning — closed
+
+Two jobs, and the npm one is shaped around the failure mode that makes most
+audit gates worthless. `npm audit --audit-level=high` goes red on day one for
+advisories somebody has already reviewed and accepted, stays red, and within a
+week a red build is the normal state — at which point a genuinely new advisory
+arrives into a build nobody looks at twice.
+
+`scripts/audit-gate.mjs` therefore fails on advisories that are **new**.
+Everything currently accepted is listed in `.audit-allowlist.json` with its
+reason and the date it was accepted, and:
+
+- an advisory not on that list fails the build, with no override flag — the only
+  way to silence one is a commit somebody reviews;
+- an entry for an advisory that no longer appears **also** fails, because a
+  stale exemption pre-approves a finding nobody has read, and because the list
+  should describe the tree.
+
+Trivy scans both production images at HIGH and CRITICAL with `ignore-unfixed`,
+for the same reason: an advisory with no fixed version is not something the
+build can act on, and failing on it produces the red-forever state above.

@@ -1,0 +1,86 @@
+{
+  "$comment": [
+    "Advisories in the production dependency tree that have been reviewed and accepted.",
+    "`scripts/audit-gate.mjs` fails the build on anything here that is NOT listed, and also",
+    "on anything listed that no longer appears \u2014 a stale exemption pre-approves a finding",
+    "nobody has looked at. The exposure analysis for each entry is in",
+    "docs/SecurityThreatModel.md under 'Dependency advisories'; this file holds the ids so",
+    "the check can be mechanical.",
+    "",
+    "Adding an entry is a commit somebody reviews. There is no override flag."
+  ],
+  "accepted": [
+    {
+      "id": "GHSA-mm7p-fcc7-pg87",
+      "package": "nodemailer",
+      "severity": "moderate",
+      "accepted": "2026-08-18",
+      "reason": "SmtpEmailProvider.send passes only from/to/subject/text/html \u2014 no envelope, list, raw, transport name or attachments \u2014 so the affected surfaces have no call path. Recipients are single stored addresses, never caller-supplied lists.",
+      "revisit": "When nodemailer ships a fixed release, or when any of those options is used."
+    },
+    {
+      "id": "GHSA-c7w3-x93f-qmm8",
+      "package": "nodemailer",
+      "severity": "moderate",
+      "accepted": "2026-08-18",
+      "reason": "Same call-path analysis as GHSA-mm7p-fcc7-pg87.",
+      "revisit": "With the nodemailer upgrade."
+    },
+    {
+      "id": "GHSA-vvjj-xcjg-gr5g",
+      "package": "nodemailer",
+      "severity": "moderate",
+      "accepted": "2026-08-18",
+      "reason": "Same call-path analysis as GHSA-mm7p-fcc7-pg87.",
+      "revisit": "With the nodemailer upgrade."
+    },
+    {
+      "id": "GHSA-268h-hp4c-crq3",
+      "package": "nodemailer",
+      "severity": "moderate",
+      "accepted": "2026-08-18",
+      "reason": "Same call-path analysis as GHSA-mm7p-fcc7-pg87.",
+      "revisit": "With the nodemailer upgrade."
+    },
+    {
+      "id": "GHSA-wqvq-jvpq-h66f",
+      "package": "nodemailer",
+      "severity": "moderate",
+      "accepted": "2026-08-18",
+      "reason": "Same call-path analysis as GHSA-mm7p-fcc7-pg87.",
+      "revisit": "With the nodemailer upgrade."
+    },
+    {
+      "id": "GHSA-r7g4-qg5f-qqm2",
+      "package": "nodemailer",
+      "severity": "moderate",
+      "accepted": "2026-08-18",
+      "reason": "Same call-path analysis as GHSA-mm7p-fcc7-pg87.",
+      "revisit": "With the nodemailer upgrade."
+    },
+    {
+      "id": "GHSA-p6gq-j5cr-w38f",
+      "package": "nodemailer",
+      "severity": "moderate",
+      "accepted": "2026-08-18",
+      "reason": "Same call-path analysis as GHSA-mm7p-fcc7-pg87.",
+      "revisit": "With the nodemailer upgrade."
+    },
+    {
+      "id": "GHSA-rcmh-qjqh-p98v",
+      "package": "nodemailer",
+      "severity": "moderate",
+      "accepted": "2026-08-18",
+      "reason": "Same call-path analysis as GHSA-mm7p-fcc7-pg87.",
+      "revisit": "With the nodemailer upgrade."
+    },
+    {
+      "id": "GHSA-w5hq-g745-h8pq",
+      "package": "uuid",
+      "severity": "moderate",
+      "accepted": "2026-08-18",
+      "reason": "Missing buffer bounds check in v3/v5/v6 when a `buf` argument is supplied. Reached only through sequelize, which calls uuid without `buf`, and MeetFlow generates ids in PostgreSQL (gen_random_uuid) or through uuid v4 with no buffer.",
+      "revisit": "When sequelize's uuid range moves past 11.1.1."
+    }
+  ]
+}

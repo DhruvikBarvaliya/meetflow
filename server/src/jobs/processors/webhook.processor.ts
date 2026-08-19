@@ -15,12 +15,15 @@
  * queue is only how it gets sent.
  */
 import crypto from 'node:crypto';
+import http from 'node:http';
+import https from 'node:https';
 import type { Job } from 'bullmq';
 import { Op, type Transaction } from 'sequelize';
 import { sequelize } from '../../config/database';
 import { createLogger } from '../../config/logger';
 import { WebhookDelivery, WebhookEndpoint } from '../../database/models';
 import { WEBHOOK_WILDCARD_EVENT } from '../../database/models/WebhookEndpoint';
+import { guardedLookup } from '../../utils/ssrf';
 import { JOB_NAMES, safeEnqueue, webhookQueue } from '../queues';
 
 const log = createLogger('webhook-worker');
@@ -74,27 +77,19 @@ export async function deliverWebhook(job: Job<{ deliveryId: string }>): Promise<
     data: delivery.payload,
   });
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
   try {
-    const response = await fetch(endpoint.url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': 'MeetFlow-Webhooks/1.0',
-        'X-MeetFlow-Event': delivery.event,
-        'X-MeetFlow-Delivery': delivery.eventId,
-        'X-MeetFlow-Timestamp': String(timestamp),
-        'X-MeetFlow-Signature': `v1=${signPayload(endpoint.signingSecret, timestamp, body)}`,
-      },
-      body,
-      signal: controller.signal,
+    const response = await postToEndpoint(endpoint.url, body, {
+      'Content-Type': 'application/json',
+      'User-Agent': 'MeetFlow-Webhooks/1.0',
+      'X-MeetFlow-Event': delivery.event,
+      'X-MeetFlow-Delivery': delivery.eventId,
+      'X-MeetFlow-Timestamp': String(timestamp),
+      'X-MeetFlow-Signature': `v1=${signPayload(endpoint.signingSecret, timestamp, body)}`,
     });
 
-    const text = (await response.text().catch(() => '')).slice(0, MAX_RESPONSE_CAPTURE);
+    const text = response.body.slice(0, MAX_RESPONSE_CAPTURE);
 
-    if (response.ok) {
+    if (response.status >= 200 && response.status < 300) {
       await delivery.update({
         status: 'DELIVERED',
         attemptCount: attempt,
@@ -137,9 +132,66 @@ export async function deliverWebhook(job: Job<{ deliveryId: string }>): Promise<
 
     log.error({ err: error, deliveryId, attempt, exhausted }, 'webhook delivery failed');
     if (!exhausted) throw error;
-  } finally {
-    clearTimeout(timer);
   }
+}
+
+/**
+ * One POST to a tenant-supplied URL, over a socket that cannot reach us.
+ *
+ * `node:http`/`node:https` rather than `fetch`, for one reason: `lookup`.
+ * `http.request` accepts a resolver, so `guardedLookup` runs on the resolution
+ * the socket is actually opened with, on every attempt. `fetch` offers no such
+ * hook without an undici `Agent`, and undici is not a dependency here — so
+ * checking the URL beforehand and then calling `fetch` would leave exactly the
+ * window DNS rebinding exists to exploit.
+ *
+ * Redirects are not followed, which is deliberate rather than an omission: a
+ * 3xx falls through to the non-2xx path and is retried like any other failure.
+ * Following one would need the whole guard again on the second hop, and an
+ * endpoint that redirects its own webhook deliveries is misconfigured anyway.
+ */
+async function postToEndpoint(
+  rawUrl: string,
+  body: string,
+  headers: Record<string, string>,
+): Promise<{ status: number; body: string }> {
+  const url = new URL(rawUrl);
+  const transport = url.protocol === 'https:' ? https : http;
+
+  return new Promise((resolve, reject) => {
+    const request = transport.request(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port === '' ? (url.protocol === 'https:' ? 443 : 80) : Number(url.port),
+        path: `${url.pathname}${url.search}`,
+        method: 'POST',
+        headers: { ...headers, 'Content-Length': Buffer.byteLength(body) },
+        // The whole point of this function.
+        lookup: guardedLookup,
+        timeout: REQUEST_TIMEOUT_MS,
+      },
+      (response) => {
+        let captured = '';
+        response.setEncoding('utf8');
+        response.on('data', (chunk: string) => {
+          // Bounded while reading, not after: an endpoint answering with a
+          // gigabyte would otherwise be buffered in full before being trimmed.
+          if (captured.length < MAX_RESPONSE_CAPTURE) captured += chunk;
+        });
+        response.on('end', () => {
+          resolve({ status: response.statusCode ?? 0, body: captured });
+        });
+        response.on('error', reject);
+      },
+    );
+
+    request.on('timeout', () => {
+      request.destroy(new Error(`No response within ${REQUEST_TIMEOUT_MS}ms`));
+    });
+    request.on('error', reject);
+    request.end(body);
+  });
 }
 
 /**

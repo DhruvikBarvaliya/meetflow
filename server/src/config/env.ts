@@ -141,6 +141,33 @@ const schema = z
     SEED_DEFAULT_PASSWORD: z.string().min(8).default('MeetFlow!Demo123'),
     SEED_ENABLED: booleanish(false),
 
+    /**
+     * Lets webhook deliveries reach private and loopback addresses.
+     *
+     * Off by default and rejected outright in production, because the guard it
+     * disables is the one stopping a tenant pointing MeetFlow's own server at
+     * `169.254.169.254` and reading the instance credentials out of the
+     * delivery log. It exists for exactly two situations, both local: a
+     * developer testing against a receiver on their own machine, and the
+     * integration suite, which starts a real HTTP server on 127.0.0.1 because
+     * asserting delivery against a mock would assert nothing about delivery.
+     */
+    WEBHOOK_ALLOW_PRIVATE_TARGETS: booleanish(false),
+
+    /**
+     * Encrypts webhook signing secrets at rest.
+     *
+     * Required in production and optional elsewhere, so a local checkout needs
+     * no configuration and a deployment cannot forget. Any length: the key is
+     * derived by SHA-256 over whatever is configured, so a passphrase and a hex
+     * string both work and neither is silently truncated.
+     *
+     * Leaving it unset stores the secrets in plaintext, which is what a leaked
+     * backup then hands somebody: the ability to forge deliveries a tenant's
+     * server accepts as genuine, which is the whole purpose of signing them.
+     */
+    WEBHOOK_SECRET_ENCRYPTION_KEY: z.string().min(16).optional(),
+
     TEST_DATABASE_URL: z.string().optional(),
     TEST_DB_NAME: z.string().default('meetflow_test'),
   })
@@ -177,6 +204,25 @@ const schema = z
           code: z.ZodIssueCode.custom,
           path: ['SEED_ENABLED'],
           message: 'SEED_ENABLED must be false in production — seeders are development-only',
+        });
+      }
+      if (!value.WEBHOOK_SECRET_ENCRYPTION_KEY) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['WEBHOOK_SECRET_ENCRYPTION_KEY'],
+          message:
+            'WEBHOOK_SECRET_ENCRYPTION_KEY is required in production — without it webhook ' +
+            'signing secrets are stored in plaintext, and a leaked backup is enough to forge ' +
+            'deliveries a tenant accepts as genuine',
+        });
+      }
+      if (value.WEBHOOK_ALLOW_PRIVATE_TARGETS) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['WEBHOOK_ALLOW_PRIVATE_TARGETS'],
+          message:
+            'WEBHOOK_ALLOW_PRIVATE_TARGETS cannot be enabled in production — it disables the ' +
+            'SSRF guard on tenant-supplied delivery URLs',
         });
       }
       if (!value.RATE_LIMIT_ENABLED) {
