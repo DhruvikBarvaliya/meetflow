@@ -148,6 +148,38 @@ set.
 | `ananya.iyer@aurorawellness.test` | Staff — own schedule and assigned appointments only                                                                                                    |
 | `admin@meetflow.dev`              | Platform administrator **and** a receptionist in the demo workspace: signing in lands in the normal app, and the platform panel is in the account menu |
 
+### More than one kind of business
+
+One workspace shows the product; it does not show the _range_ of it. A barber
+taking twenty-minute walk-ins and a consultancy selling ninety-minute video
+calls produce diaries, availability screens and public pages that look nothing
+alike, and a single seeded studio hides that.
+
+```bash
+npm run demo-data              # add six more workspaces to whatever is there
+npm run demo-data -- --reset   # wipe, reseed Aurora, then add the six
+```
+
+Six workspaces that differ where it counts — appointment length, group
+capacity, approval on or off, physical against virtual, one practitioner
+against five, currency, time zone, buffers, notice periods:
+
+| Workspace                 | Shape                                                        |
+| ------------------------- | ------------------------------------------------------------ |
+| Northgate Dental Practice | GBP, London, approval required, 20–45 minute appointments    |
+| The Fade Room             | INR, Bengaluru, walk-in pace, six days, three chairs         |
+| Clearwater Physiotherapy  | AUD, Sydney, two clinics, waitlist on, early starts          |
+| Lighthouse Tutoring       | USD, New York, **group classes**, evenings only, all virtual |
+| Sterling & Co Advisory    | EUR, Berlin, one partner, 90-minute calls, long notice       |
+| Harbour Veterinary Clinic | INR, Kochi, high volume, Saturday clinic, waitlist on        |
+
+Every workspace is built **through the API**, not by inserting rows — services
+pass their own validation, staff get real availability, and each appointment
+goes through the slot engine and lands inside the same exclusion constraint
+that guards production. The one exception is marked in the script: past
+appointments are booked ahead and then aged backwards, because `POST
+/appointments` refuses a past start time and is right to.
+
 The last row is the shape of the feature, not a shortcut for the demo.
 `platform_role` grants nothing inside a tenant and a membership grants nothing
 across the platform, so an operator who wants a front-desk session has to hold a
