@@ -49,6 +49,10 @@ import {
   CANCELLED_BY_TYPES,
 } from '../database/models/Appointment';
 import {
+  NOTIFICATION_TEMPLATE_CHANNELS,
+  NOTIFICATION_TEMPLATE_KEYS,
+} from '../database/models/NotificationTemplate';
+import {
   APPOINTMENT_PARTICIPANT_ROLES,
   APPOINTMENT_PARTICIPANT_STATUSES,
 } from '../database/models/AppointmentParticipant';
@@ -2777,4 +2781,70 @@ export const publicBookingConfirmationSchema = named(
       }),
     })
     .openapi({ description: 'What a customer gets back from booking.' }),
+);
+
+// ---------------------------------------------------------------------------
+// Notification templates
+//
+// Transcribed from `TemplateView` and `TemplatePreview` in
+// `modules/notifications/templates.service.ts`. `key` and `channel` come from
+// the model's own constant lists, per rule 2 — a seventeenth template key is
+// then a compile error here rather than a contract that quietly omits it.
+// ---------------------------------------------------------------------------
+
+export const notificationTemplateSchema = named(
+  'NotificationTemplate',
+  z
+    .object({
+      key: z.enum(NOTIFICATION_TEMPLATE_KEYS),
+      channel: z.enum(NOTIFICATION_TEMPLATE_CHANNELS),
+      locale: z.string(),
+      subject: z.string().nullable().openapi({
+        description:
+          'What will actually be sent. Null on SMS and in-app messages, which have no subject.',
+      }),
+      bodyText: z.string().openapi({ description: 'What will actually be sent.' }),
+      source: z.enum(['WORKSPACE', 'BUILT_IN']).openapi({
+        description:
+          'Where the copy above comes from. `BUILT_IN` messages change when MeetFlow improves ' +
+          'them; `WORKSPACE` messages do not, which is the distinction the screen exists to show.',
+      }),
+      isActive: z.boolean().openapi({
+        description:
+          'Whether the workspace override is live. False with no override at all, and false for ' +
+          'an override deliberately switched off — a parked draft, where `source` stays BUILT_IN.',
+      }),
+      defaultSubject: z.string().nullable().openapi({
+        description: 'MeetFlow’s own copy, always present, so the editor can offer to restore it.',
+      }),
+      defaultBodyText: z.string().nullable(),
+      placeholders: z.array(z.object({ name: z.string(), description: z.string() })).openapi({
+        description:
+          'The names this message can fill, with one line of help each. Writing anything else ' +
+          'is refused on save rather than rendered as empty text.',
+      }),
+      updatedAt: instant.nullable().openapi({
+        description: 'When the override was last written. Null when there is no override.',
+      }),
+    })
+    .openapi({ description: 'One message, with what is being sent and what could be.' }),
+);
+
+export const notificationTemplatePreviewSchema = named(
+  'NotificationTemplatePreview',
+  z
+    .object({
+      subject: z.string().nullable(),
+      bodyText: z.string(),
+      bodyHtml: z
+        .string()
+        .nullable()
+        .openapi({
+          description:
+            'The generated HTML part. Null for SMS and in-app, which have none — previewing one ' +
+            'would show the operator something the recipient never sees.',
+        }),
+      placeholdersUsed: z.array(z.string()),
+    })
+    .openapi({ description: 'A draft rendered against sample data, before it is saved.' }),
 );

@@ -9,6 +9,7 @@ import {
   LayoutDashboard,
   Link2,
   ListChecks,
+  Mail,
   MapPin,
   Package,
   ScrollText,
@@ -209,6 +210,12 @@ export const NAVIGATION: NavSection[] = [
         to: '/app/webhooks',
         icon: Webhook,
         permission: [PERMISSIONS.WEBHOOKS_READ],
+      },
+      {
+        label: 'Messages',
+        to: '/app/messages',
+        icon: Mail,
+        permission: [PERMISSIONS.TEMPLATES_MANAGE],
       },
       {
         label: 'Settings',

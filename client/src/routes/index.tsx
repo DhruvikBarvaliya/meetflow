@@ -67,6 +67,7 @@ const ReportsPage = lazy(() => import('@/pages/owner/ReportsPage'));
 const MembersPage = lazy(() => import('@/pages/owner/MembersPage'));
 const AuditLogPage = lazy(() => import('@/pages/owner/AuditLogPage'));
 const WebhooksPage = lazy(() => import('@/pages/owner/WebhooksPage'));
+const MessageTemplatesPage = lazy(() => import('@/pages/owner/MessageTemplatesPage'));
 const WorkspaceSettingsPage = lazy(() => import('@/pages/owner/WorkspaceSettingsPage'));
 
 const SchedulePage = lazy(() => import('@/pages/staff/SchedulePage'));
@@ -245,6 +246,12 @@ const router = createBrowserRouter([
       // whole screen to the role it was largely written for.
       { path: 'audit-log', element: guarded(AuditLogPage, PERMISSIONS.AUDIT_READ) },
       { path: 'webhooks', element: guarded(WebhooksPage, PERMISSIONS.WEBHOOKS_READ) },
+      // `templates:manage` and not a read grant, because there is no read
+      // grant to pair it with — message copy is a single permission. Guarding
+      // on the write grant refuses nothing that would have worked: the page is
+      // an editor, and a caller who cannot save has nothing to do on it. Both
+      // owners and managers hold it.
+      { path: 'messages', element: guarded(MessageTemplatesPage, PERMISSIONS.TEMPLATES_MANAGE) },
       { path: 'settings', element: guarded(WorkspaceSettingsPage, PERMISSIONS.WORKSPACE_READ) },
 
       { path: 'my/schedule', element: guarded(SchedulePage, DIARY_READ, 'any') },

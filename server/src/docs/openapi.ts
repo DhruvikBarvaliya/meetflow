@@ -159,6 +159,12 @@ import {
   updateWebhookSchema,
   webhookIdParamsSchema,
 } from '../modules/webhooks/webhooks.validation';
+import {
+  listTemplatesQuerySchema,
+  previewTemplateSchema,
+  templateParamsSchema,
+  upsertTemplateSchema,
+} from '../modules/notifications/templates.validation';
 import { analyticsRangeQuerySchema } from '../modules/analytics/analytics.validation';
 import {
   appointmentExportQuerySchema,
@@ -232,6 +238,7 @@ const TAGS = {
   appointments: 'Appointments',
   waitlist: 'Waitlist',
   webhooks: 'Webhooks',
+  notificationTemplates: 'Notification Templates',
   analytics: 'Analytics',
   reports: 'Reports',
   audit: 'Audit',
@@ -2919,6 +2926,127 @@ operation({
     R.webhookDeliverySchema,
   ),
   errors: MANAGEMENT_ERRORS,
+});
+
+// ---------------------------------------------------------------------------
+// Notification templates
+// ---------------------------------------------------------------------------
+
+const upsertTemplateRequest = component('UpsertNotificationTemplateRequest', upsertTemplateSchema);
+const previewTemplateRequest = component(
+  'PreviewNotificationTemplateRequest',
+  previewTemplateSchema,
+);
+
+const TEMPLATE_PLACEHOLDER_NOTE =
+  'Bodies interpolate `{{placeholder}}` names, and an unknown one renders as **empty text** ' +
+  'rather than failing — so a typo would ship an email opening "Hi ," to every customer with ' +
+  'nothing logged. Every write is therefore checked against the catalogue that message can ' +
+  'fill, returned on the read as `placeholders`, and a body naming anything else is refused ' +
+  'with 422 listing both the offender and the alternatives. Requires `templates:manage`, ' +
+  'which the built-in roles grant to owners and managers — rewriting a confirmation email is ' +
+  'operational work rather than an act of workspace authority.';
+
+operation({
+  method: 'get',
+  path: '/api/v1/notification-templates',
+  tag: TAGS.notificationTemplates,
+  operationId: 'notificationTemplates.list',
+  summary: 'List the messages this workspace sends',
+  description:
+    'Every message MeetFlow defines, with the copy going out today and whether it is the ' +
+    "workspace's own or the built-in default. Driven from the catalogue rather than from the " +
+    'overrides table, so a workspace that has never edited anything still sees what is being ' +
+    'sent in its name. Not paginated: there is one page and there always will be. ' +
+    TEMPLATE_PLACEHOLDER_NOTE,
+  tenant: true,
+  query: listTemplatesQuerySchema,
+  responses: ok(
+    '`data` is every message, each resolved to what will actually be sent.',
+    z.array(R.notificationTemplateSchema),
+  ),
+  errors: MANAGEMENT_ERRORS,
+});
+
+operation({
+  method: 'get',
+  path: '/api/v1/notification-templates/{key}/{channel}',
+  tag: TAGS.notificationTemplates,
+  operationId: 'notificationTemplates.get',
+  summary: 'Read one message',
+  description:
+    'The same shape as one row of the listing. `defaultSubject` and `defaultBodyText` are ' +
+    'always present, whether or not an override exists, so the editor can diff against the ' +
+    'default and offer to restore it without a second request. ' +
+    TEMPLATE_PLACEHOLDER_NOTE,
+  tenant: true,
+  params: templateParamsSchema,
+  responses: ok('`data` is the message.', R.notificationTemplateSchema),
+  errors: MANAGEMENT_ERRORS,
+});
+
+operation({
+  method: 'put',
+  path: '/api/v1/notification-templates/{key}/{channel}',
+  tag: TAGS.notificationTemplates,
+  operationId: 'notificationTemplates.upsert',
+  summary: 'Replace one message with the workspace’s own copy',
+  description:
+    'Creates the override or replaces it; the address is fixed by the key and channel, so this ' +
+    'never creates a resource at a URL the caller did not already have and answers 200 rather ' +
+    'than 201. An email without a subject is refused — every spam filter reads a blank one ' +
+    'exactly as it looks. There is no `bodyHtml` field and there will not be: the HTML part is ' +
+    'generated from the text with every interpolated value escaped, and accepting tenant-' +
+    "authored markup would put it inside a message MeetFlow's own domain is signing. " +
+    '`isActive: false` parks a draft — the row is kept and the default is what customers ' +
+    'receive. ' +
+    TEMPLATE_PLACEHOLDER_NOTE,
+  tenant: true,
+  params: templateParamsSchema,
+  body: upsertTemplateRequest,
+  responses: ok('`data` is the message as it now stands.', R.notificationTemplateSchema),
+  errors: MANAGEMENT_WRITE_ERRORS,
+});
+
+operation({
+  method: 'delete',
+  path: '/api/v1/notification-templates/{key}/{channel}',
+  tag: TAGS.notificationTemplates,
+  operationId: 'notificationTemplates.reset',
+  summary: 'Restore MeetFlow’s copy',
+  description:
+    'Drops the override entirely rather than deactivating it or replacing it with a snapshot, ' +
+    'so the next send reads the built-in default and picks up every later improvement to it — ' +
+    'which is why defaults are never copied into a workspace in the first place. Answers 404 ' +
+    'when there is no override: telling an operator their edit was undone when there was no ' +
+    'edit is worse than saying there is nothing here. Requires `templates:manage`.',
+  tenant: true,
+  params: templateParamsSchema,
+  responses: deleted('The override is gone and the built-in default applies again.'),
+  errors: MANAGEMENT_ERRORS,
+});
+
+operation({
+  method: 'post',
+  path: '/api/v1/notification-templates/{key}/{channel}/preview',
+  tag: TAGS.notificationTemplates,
+  operationId: 'notificationTemplates.preview',
+  summary: 'Render a draft against sample data',
+  description:
+    'Takes the draft in the request rather than reading the saved row, because the question ' +
+    'being asked is "should I save this" and answering it after the save is answering it too ' +
+    'late. Reads and writes nothing, but is a POST because a body somebody is still editing ' +
+    'does not belong in a query string, a proxy log, or browser history. The same validation ' +
+    'runs, so a preview can never show a draft the save would refuse. Requires ' +
+    '`templates:manage`.',
+  tenant: true,
+  params: templateParamsSchema,
+  body: previewTemplateRequest,
+  responses: ok(
+    '`data` is the rendered draft. Nothing was stored.',
+    R.notificationTemplatePreviewSchema,
+  ),
+  errors: MANAGEMENT_WRITE_ERRORS,
 });
 
 // ---------------------------------------------------------------------------

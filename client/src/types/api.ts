@@ -1642,3 +1642,78 @@ export interface WebhookDeliveryFilters {
   status: WebhookDeliveryStatus | '';
   event: string;
 }
+
+// ---------------------------------------------------------------------------
+// Notification templates
+//
+// `GET /notification-templates`. The list is the whole catalogue, not the
+// override rows: a workspace that has never edited a message still needs to see
+// what is being sent in its name.
+// ---------------------------------------------------------------------------
+
+export const NOTIFICATION_TEMPLATE_KEYS = [
+  'BOOKING_CONFIRMATION',
+  'BOOKING_PENDING_APPROVAL',
+  'BOOKING_APPROVED',
+  'BOOKING_REJECTED',
+  'BOOKING_CANCELLED',
+  'BOOKING_RESCHEDULED',
+  'APPOINTMENT_REMINDER',
+  'APPOINTMENT_FOLLOW_UP',
+  'APPOINTMENT_NO_SHOW',
+  'WAITLIST_SLOT_AVAILABLE',
+  'WAITLIST_CONFIRMED',
+  'STAFF_ASSIGNED',
+  'STAFF_SCHEDULE_CHANGED',
+  'OWNER_DAILY_DIGEST',
+  'OWNER_NEW_BOOKING',
+  'CUSTOMER_WELCOME',
+] as const;
+export type NotificationTemplateKey = (typeof NOTIFICATION_TEMPLATE_KEYS)[number];
+
+export const NOTIFICATION_TEMPLATE_CHANNELS = ['EMAIL', 'SMS', 'IN_APP'] as const;
+export type NotificationTemplateChannel = (typeof NOTIFICATION_TEMPLATE_CHANNELS)[number];
+
+export interface TemplatePlaceholder {
+  name: string;
+  description: string;
+}
+
+export interface NotificationTemplate {
+  key: NotificationTemplateKey;
+  channel: NotificationTemplateChannel;
+  locale: string;
+  /** What will actually be sent. Null on channels with no subject line. */
+  subject: string | null;
+  bodyText: string;
+  /**
+   * `BUILT_IN` messages improve when MeetFlow improves them; `WORKSPACE`
+   * messages do not. That difference is the point of the screen.
+   */
+  source: 'WORKSPACE' | 'BUILT_IN';
+  /** False both when there is no override and when one is parked. */
+  isActive: boolean;
+  defaultSubject: string | null;
+  defaultBodyText: string | null;
+  placeholders: TemplatePlaceholder[];
+  updatedAt: string | null;
+}
+
+/**
+ * No `bodyHtml`, and there will not be one: the HTML part is generated from the
+ * text with every interpolated value escaped, so tenant-authored markup never
+ * reaches a message MeetFlow's own domain signs.
+ */
+export interface UpsertNotificationTemplateRequest {
+  subject?: string;
+  bodyText: string;
+  isActive?: boolean;
+}
+
+export interface NotificationTemplatePreview {
+  subject: string | null;
+  bodyText: string;
+  /** Null for channels with no HTML part. */
+  bodyHtml: string | null;
+  placeholdersUsed: string[];
+}

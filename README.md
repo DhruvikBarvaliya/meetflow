@@ -28,9 +28,9 @@ surrounding surface are still being closed.
 
 |              |                                                                 |
 | ------------ | --------------------------------------------------------------- |
-| Server tests | **509 passing** (unit + integration, real PostgreSQL)           |
+| Server tests | **557 passing** (unit + integration, real PostgreSQL)           |
 | Client tests | **36 passing** (unit, the pure display and money helpers)       |
-| End-to-end   | **46 passing** (Playwright, real stack, no mocks)               |
+| End-to-end   | **51 passing** (Playwright, real stack, no mocks)               |
 | Typecheck    | clean, strict, across server + client + e2e                     |
 | Lint         | clean                                                           |
 | Builds       | server and client both build; production image runs as non-root |
@@ -38,15 +38,16 @@ surrounding surface are still being closed.
 
 ## Why it is different
 
-| Capability                         | How MeetFlow does it                                                                                                                                                                                                                      |
-| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Double booking is impossible**   | PostgreSQL GiST _exclusion constraints_ over `tstzrange`, not application checks. Under 10 concurrent requests for one slot, exactly one commits.                                                                                         |
-| **DST is handled, not hoped for**  | Wall-clock rules are stored as minutes-from-local-midnight plus an IANA zone and resolved through Luxon. Times that don't exist (spring-forward) are detected and dropped; times that happen twice (fall-back) resolve deterministically. |
-| **Buffers are real reservations**  | Pre/post buffers are part of the calendar footprint that the exclusion constraint guards, so back-to-back bookings respect cleanup time.                                                                                                  |
-| **Group services**                 | One appointment, many participants. Capacity is enforced under a row lock — an exclusion constraint cannot express "at most N".                                                                                                           |
-| **Smart Match**                    | Deterministic, explainable, weighted ranking of eligible providers. No AI, no hidden behaviour; every ranking returns its own reasons.                                                                                                    |
-| **Tenant isolation is structural** | The tenant id comes from an ACTIVE membership row, never from client input. Cross-tenant access returns 404, not 403, so endpoints can't be used as existence oracles.                                                                    |
-| **Notifications survive outages**  | A transactional outbox: the notification row commits with the booking. A periodic sweep re-enqueues anything the queue lost.                                                                                                              |
+| Capability                             | How MeetFlow does it                                                                                                                                                                                                                      |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Double booking is impossible**       | PostgreSQL GiST _exclusion constraints_ over `tstzrange`, not application checks. Under 10 concurrent requests for one slot, exactly one commits.                                                                                         |
+| **DST is handled, not hoped for**      | Wall-clock rules are stored as minutes-from-local-midnight plus an IANA zone and resolved through Luxon. Times that don't exist (spring-forward) are detected and dropped; times that happen twice (fall-back) resolve deterministically. |
+| **Buffers are real reservations**      | Pre/post buffers are part of the calendar footprint that the exclusion constraint guards, so back-to-back bookings respect cleanup time.                                                                                                  |
+| **Group services**                     | One appointment, many participants. Capacity is enforced under a row lock — an exclusion constraint cannot express "at most N".                                                                                                           |
+| **Smart Match**                        | Deterministic, explainable, weighted ranking of eligible providers. No AI, no hidden behaviour; every ranking returns its own reasons.                                                                                                    |
+| **Tenant isolation is structural**     | The tenant id comes from an ACTIVE membership row, never from client input. Cross-tenant access returns 404, not 403, so endpoints can't be used as existence oracles.                                                                    |
+| **Notifications survive outages**      | A transactional outbox: the notification row commits with the booking. A periodic sweep re-enqueues anything the queue lost.                                                                                                              |
+| **Message copy cannot break silently** | A workspace rewrites any of the sixteen messages it sends. Placeholders are checked against what that message can actually fill, so a typo is refused with the alternatives listed rather than mailed out as empty text.                  |
 
 ---
 
@@ -281,19 +282,12 @@ Stated plainly, so nothing here is mistaken for finished work.
   behaviour the product actually relies on (confirmations, reminders, waitlist
   offers, real-time updates) is implemented directly and does not depend on
   this.
-- **Per-workspace notification templates.** `notification_templates` is created
-  by migration and read by `resolveTemplate`, but nothing ever writes it — no
-  seeder, no route — so every message uses the built-in default and the
-  `TEMPLATES_MANAGE` permission guards no endpoint. See
-  [docs/NotificationArchitecture.md](docs/NotificationArchitecture.md#templates).
 - **SMS and in-app notification channels.** The outbox models them and the
   worker closes such rows out honestly as `CANCELLED` with a reason rather than
   reporting them delivered. Only email has a provider.
 - **External calendar sync** (Google, Outlook) and **payments**. Deliberately
   not stubbed — see `docs/ADR/README.md` (ADR-0009) for why an empty adapter is
   worse than an honest absence.
-- **CI pipeline.** The quality gates all run locally via `npm run verify`;
-  nothing wires them to a CI service yet.
 - The security gaps recorded in
   [docs/SecurityThreatModel.md](docs/SecurityThreatModel.md) — no bot challenge
   on public booking, no SSRF allowlist on webhook targets, email verification

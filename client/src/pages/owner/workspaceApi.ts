@@ -13,7 +13,12 @@ import type {
   MemberRecord,
   Page,
   UpdateMemberRequest,
+  NotificationTemplate,
+  NotificationTemplateChannel,
+  NotificationTemplateKey,
+  NotificationTemplatePreview,
   UpdateWebhookRequest,
+  UpsertNotificationTemplateRequest,
   WebhookDeliveryFilters,
   WebhookDeliveryRecord,
   WebhookEndpoint,
@@ -91,6 +96,12 @@ export const workspaceKeys = {
     [...ownerKeys.root(businessId), 'webhooks', 'list', scope] as const,
   webhookDeliveries: (businessId: string | null, endpointId: string, scope: QueryScope) =>
     [...ownerKeys.root(businessId), 'webhooks', 'deliveries', endpointId, scope] as const,
+
+  // One key for the whole catalogue rather than one per message: the listing is
+  // a single unpaginated response and every write invalidates it, so a per-key
+  // cache entry would be sixteen entries that are always refetched together.
+  notificationTemplates: (businessId: string | null) =>
+    [...ownerKeys.root(businessId), 'notification-templates', 'list'] as const,
 } as const;
 
 /**
@@ -341,5 +352,56 @@ export function fetchWebhookDeliveries(
 ): Promise<Page<WebhookDeliveryRecord>> {
   return api.getPage<WebhookDeliveryRecord>(
     `/webhooks/${endpointId}/deliveries${toSearchParams(deliveryScope(filters))}`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Notification templates
+//
+// The address of a message is its key *and* channel, because the table's unique
+// index is on both and a workspace may well rewrite the email confirmation and
+// leave the SMS one alone.
+// ---------------------------------------------------------------------------
+
+export function fetchNotificationTemplates(): Promise<NotificationTemplate[]> {
+  return api.get<NotificationTemplate[]>('/notification-templates');
+}
+
+export function saveNotificationTemplate(
+  key: NotificationTemplateKey,
+  channel: NotificationTemplateChannel,
+  input: UpsertNotificationTemplateRequest,
+): Promise<NotificationTemplate> {
+  return api.put<NotificationTemplate>(`/notification-templates/${key}/${channel}`, input);
+}
+
+/**
+ * Drops the workspace's copy, restoring MeetFlow's.
+ *
+ * Answers 404 when there is nothing to reset, which the screen only ever
+ * reaches by racing itself — the control is hidden for a message that has no
+ * override.
+ */
+export function resetNotificationTemplate(
+  key: NotificationTemplateKey,
+  channel: NotificationTemplateChannel,
+): Promise<void> {
+  return api.delete(`/notification-templates/${key}/${channel}`);
+}
+
+/**
+ * Renders a draft against sample data without saving it.
+ *
+ * A POST despite reading nothing: a body somebody is still editing does not
+ * belong in a query string, a proxy log, or browser history.
+ */
+export function previewNotificationTemplate(
+  key: NotificationTemplateKey,
+  channel: NotificationTemplateChannel,
+  input: { subject?: string; bodyText: string },
+): Promise<NotificationTemplatePreview> {
+  return api.post<NotificationTemplatePreview>(
+    `/notification-templates/${key}/${channel}/preview`,
+    input,
   );
 }

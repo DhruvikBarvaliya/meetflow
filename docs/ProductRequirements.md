@@ -204,8 +204,18 @@ it after commit with backoff and a recovery sweep. See
 [NotificationArchitecture.md](NotificationArchitecture.md).
 
 Limitations: SMS is modelled and not delivered — non-email rows are closed as
-cancelled _with a reason_ rather than reported sent. Six of sixteen templates
-have no producer (gap 29).
+cancelled _with a reason_ rather than reported sent.
+
+One of the sixteen templates has no producer: `OWNER_DAILY_DIGEST`, which needs
+a scheduled job nothing runs. The other fifteen are queued by real flows, and
+`notificationPlaceholderDrift.test.ts` proves it rather than asserting it — it
+exercises each flow and fails if a message stops being produced, so this count
+cannot go stale again without a red test. (This section previously said six of
+sixteen had no producer; five gained one and the number was not revised.)
+
+A workspace can rewrite any of the sixteen through
+`/api/v1/notification-templates`, and a body naming a placeholder the message
+cannot fill is refused rather than sent as empty text.
 
 ---
 

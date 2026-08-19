@@ -95,8 +95,15 @@ export const AuditActions = {
   WAITLIST_CONVERTED: 'waitlist.converted',
   WAITLIST_CANCELLED: 'waitlist.cancelled',
 
-  // Communication & integration
+  // Communication & integration.
+  //
+  // Both template verbs are separate from `BUSINESS_SETTINGS_UPDATED` because
+  // they answer a question settings cannot: who changed what our customers are
+  // told, and when. The bodies themselves are deliberately not recorded — an
+  // audit log is not a revision history, and message copy routinely quotes a
+  // customer's own words back at them.
   NOTIFICATION_TEMPLATE_UPDATED: 'notification_template.updated',
+  NOTIFICATION_TEMPLATE_RESET: 'notification_template.reset',
   AUTOMATION_RULE_CREATED: 'automation_rule.created',
   AUTOMATION_RULE_UPDATED: 'automation_rule.updated',
   WEBHOOK_ENDPOINT_CREATED: 'webhook_endpoint.created',

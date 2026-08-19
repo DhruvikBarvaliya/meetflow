@@ -152,14 +152,43 @@ workspace is created. `resolveTemplate` looks for a workspace override, then a
 system row, then falls back to the built-in default — workspace override →
 system row → built-in default.
 
-**Only the third branch runs today.** `notification_templates` is created by
-migration but never written: no seeder inserts the system rows, and no route
-lets a workspace create an override, so the table is empty in every environment
-and the built-in defaults are always what a customer receives. The `TEMPLATES_MANAGE`
-permission is defined and granted to owners but is attached to no endpoint.
-Closing this means either seeding the system rows or dropping the permission —
-a product decision, recorded here rather than quietly left as an unreachable
-code path.
+**The override branch is reachable through
+`/api/v1/notification-templates`**, guarded by `templates:manage` — the
+permission the built-in roles grant to owners and managers and which used to be
+attached to nothing. Rewriting a confirmation email is operational work rather
+than an act of workspace authority, which is why a manager holds it. A
+workspace lists every message MeetFlow defines, replaces any of them, parks a
+draft with `isActive: false`, previews one against sample data before saving,
+and drops its version to go back to MeetFlow's.
+
+Two choices in that surface are worth stating, because both are the opposite of
+the obvious one:
+
+- **Defaults are never copied into a workspace.** Seeding sixteen rows at
+  workspace creation would freeze each message at the version that shipped that
+  day, so improving the confirmation email would reach nobody who signed up
+  before it. A workspace holds a row only where somebody deliberately wrote
+  one, and `DELETE` removes that row rather than restoring a snapshot — which
+  is why the screen says "MeetFlow's default" and not "the original".
+- **An unknown placeholder is refused, not rendered.** `renderTemplate`
+  substitutes a name it does not recognise with an empty string, so
+  `{{cusotmerName}}` would ship an email opening "Hi ," to every customer with
+  nothing logged and nothing to notice. Every write is checked against
+  `modules/notifications/placeholders.ts`, which lists what each message can
+  fill, and the 422 names the offender and the alternatives.
+
+The system-row branch in the middle is still unused: nothing inserts a row with
+a NULL `businessId`, because the built-in defaults in `templates.ts` already
+serve that purpose and a database copy of them would be a second source of
+truth. It is kept because the partial unique index and the resolution order
+cost nothing and a platform-wide override is a plausible future need.
+
+`placeholders.ts` is a promise, and `notificationPlaceholderDrift.test.ts` is
+what keeps it one: it books, cancels, moves, rejects and no-shows real
+appointments, joins a waitlist and frees a slot into it, then asserts that every
+name the catalogue offers is genuinely present in the payload that reached the
+outbox. A producer that drops a field fails a test rather than silently emptying
+a placeholder in production.
 
 Rendering is deliberately **not** a general template engine. Bodies are partly
 author-controlled, and a real engine would turn "edit your confirmation email"

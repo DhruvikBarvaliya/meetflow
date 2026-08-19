@@ -552,6 +552,12 @@ test.describe('the sidebar', () => {
      * comparison rather than as another literal array is what keeps this test
      * true when a page is added. What separates the roles is what each page
      * offers once open, which the manager test above asserts directly.
+     *
+     * `Messages` is the page that tested this most recently: it is gated on
+     * `templates:manage`, which reads like an owner-only grant and is not one —
+     * `MANAGER_PERMISSIONS` carries it, because a manager running the workspace
+     * day to day is exactly who rewrites a confirmation email. This assertion
+     * is what said so.
      */
     const ownerContext = await browser.newContext();
     const ownerPage = await ownerContext.newPage();

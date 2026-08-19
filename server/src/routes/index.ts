@@ -66,6 +66,7 @@ import { publicWaitlistRouter } from '../modules/waitlist/publicWaitlist.routes'
 import { staffRouter } from '../modules/staff/staff.routes';
 import { teamsRouter } from '../modules/teams/teams.routes';
 import { waitlistRouter } from '../modules/waitlist/waitlist.routes';
+import { notificationTemplatesRouter } from '../modules/notifications/templates.routes';
 import { webhooksRouter } from '../modules/webhooks/webhooks.routes';
 
 export const apiRouter = Router();
@@ -209,6 +210,7 @@ managementRouter.use('/booking-links', bookingLinksRouter);
 managementRouter.use('/appointments', appointmentsRouter);
 managementRouter.use('/waitlist', waitlistRouter);
 managementRouter.use('/webhooks', webhooksRouter);
+managementRouter.use('/notification-templates', notificationTemplatesRouter);
 managementRouter.use('/analytics', analyticsRouter);
 managementRouter.use('/reports', reportsRouter);
 managementRouter.use('/audit-logs', auditRouter);
