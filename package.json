@@ -41,6 +41,7 @@
     "infra:logs": "docker compose logs -f",
     "secretscan": "node scripts/secret-scan.mjs",
     "audit:gate": "node scripts/audit-gate.mjs",
+    "verification-link": "node scripts/verification-link.mjs",
     "verify": "npm run format:check && npm run lint && npm run typecheck && npm run test && npm run build"
   },
   "devDependencies": {
